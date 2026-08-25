@@ -6,7 +6,7 @@ class User:
         self.id = str(uuid.uuid4())
         self.name = name
         self.protocol = protocol
-        self.table_id = None
+        self.game_id = None
 
     def send(self, message):
         """
@@ -27,6 +27,6 @@ class User:
         user_json = {
             "id": self.id,
             "name": self.name,
-            "table_id": self.table_id
+            "game_id": self.game_id
         }
         return user_json

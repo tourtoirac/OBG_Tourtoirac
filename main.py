@@ -8,7 +8,6 @@ from autobahn.twisted.websocket import (
 )
 
 from lobby import Lobby
-from table import Table
 from user import User
 from game import Game
 
@@ -16,19 +15,9 @@ from twisted.internet import reactor
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# WebSocket Protocol
-# ============================================================
-
 class GameWebSocketProtocol(WebSocketServerProtocol):
-
     def onConnect(self, request):
-        logger.info(f"[WEBSOCKET] new connection : {request.peer}")
-
-        # ----------------------------------------------------
-        # User
-        # ----------------------------------------------------
-
+        logger.info(f"New connection : {request.peer}")
         user = User(
             name="Anonymous",
             protocol=self
@@ -38,7 +27,7 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
         self.factory.lobby.add_user(user)
 
     def onOpen(self):
-        logger.info("[WEBSOCKET] WebSocket connection opened")
+        logger.info("WebSocket connection opened")
 
     def onMessage(self, payload, is_binary):
         if is_binary:
@@ -56,9 +45,7 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "Invalid JSON message"
             )
             return
-
-        logger.debug(f"[WEBSOCKET] received message : {message}")
-
+        logger.debug(f"Received message : {message}")
         self.handle_message(message)
 
     def handle_message(self, message):
@@ -74,37 +61,30 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
 
     def handle_join(self, message):
         user = self.factory.lobby.get_user(self)
-        table_id = message.get("table_id")
-
-        if table_id is None:
+        game_id = message.get("game_id")
+        if game_id is None:
             self.send_error(
-                "missing_table_id",
-                "The join message requires a table_id"
+                "missing_game_id",
+                "The join message requires a game_id"
             )
             return
-
-        success, error = self.factory.lobby.join_table(
+        success, error = self.factory.lobby.join_game(
             user,
-            table_id
+            game_id
         )
 
         if not success:
             self.send_error(
                 error,
-                f"Unable to join table {table_id}"
+                f"Unable to join game {game_id}"
             )
             return
-
-        logger.debug(f"[LOBBY] {user.name} joined table {table_id}")
-
-        # ----------------------------------------------------
-        # Confirmation
-        # ----------------------------------------------------
+        logger.debug(f"{user.name} joined game {game_id}")
 
         user.send({
             "event": "joined",
-            "table": {
-                "id": user.table.id,
+            "game": {
+                "id": user.game.id,
                 "users": [
                     {
                         "id": user.id,
@@ -116,7 +96,6 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
         })
 
     def send_error(self, code, message):
-
         payload = {
             "event": "error",
             "error": {
@@ -124,85 +103,46 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "message": message
             }
         }
-
         encoded = json.dumps(payload).encode("utf-8")
-
         self.sendMessage(
             encoded,
             isBinary=False
         )
 
-    # ========================================================
-    # Closing
-    # ========================================================
-
     def onClose(self, was_clean, code, reason):
-        logger.info(f"[WEBSOCKET] Closed connection : clean={was_clean}, code={code}, reason={reason}")
+        logger.info(f"Closed connection : clean={was_clean}, code={code}, reason={reason}")
         user = self.factory.lobby.get_user(self)
         logger.info(f"[LOBBY] Deleting user : {user.name}")
         self.factory.lobby.delete_user(
             user
         )
 
-# ============================================================
-# WebSocket Factory
-# ============================================================
-
 class GameWebSocketFactory(WebSocketServerFactory):
-
     protocol = GameWebSocketProtocol
-
     def __init__(self, url, lobby):
-
         super().__init__(url)
-
         self.lobby = lobby
 
 
-# ============================================================
-# Lobby
-# ============================================================
-
 def create_lobby():
-
     lobby = Lobby()
-
     return lobby
 
 
-# ============================================================
-# Server
-# ============================================================
-
 def main():
-
-    # --------------------------------------------------------
-    # Lobby
-    # --------------------------------------------------------
-
+    # Lobby creation
     lobby = create_lobby()
-
     logger.info(f"[SERVER] Lobby created : {lobby.return_lobby_json()}")
 
-    # --------------------------------------------------------
-    # WebSocket
-    # --------------------------------------------------------
-
+    # WebSocket init
     factory = GameWebSocketFactory(
         "ws://0.0.0.0:9000",
         lobby
     )
-
     listenWS(factory)
-
-    logger.info("[SERVER] WebSocket server started on ws://0.0.0.0:9000")
-
+    logger.info("WebSocket server started on ws://0.0.0.0:9000")
     reactor.run()
 
-
-# ============================================================
-# Entry point
-# ============================================================
 
 if __name__ == "__main__":
     main()
