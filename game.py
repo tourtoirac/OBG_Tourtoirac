@@ -1,17 +1,40 @@
+from unittest import loader
+
+from user import User
+from Components.board import Board
+
 import uuid
 
+
 class Game:
-    def __init__(self, code: str, max_players: int, max_watchers: int, game: str):
-        self.id = str(uuid.uuid4())
+    def __init__(
+            self,
+            name: str,
+            key: str,
+            code: str,
+            player: User,
+            game_json: dict,
+            ):
+        self.key = key
+        self.name = name
         self.code = code
         self.components = {
-            "fixed": [],
+            "fixed": {
+                "boards": []
+            },
             "movable": [],
         }
-        self.max_players = max_players
-        self.max_watchers = max_watchers
-        self.players = []
+        self.max_players = game_json["game"]["max_players"]
+        self.max_watchers = game_json["game"]["max_watchers"]
+        self.players = [player]
         self.watchers = []
+        self.game_json = game_json
+        self.load_game_components()
+
+    def load_game_components(self):
+        for component in self.game_json['board']:
+            board = Board(component['id'], component['x'], component['y'], component['width'], component['height'], component['src'])
+            self.components["fixed"]["boards"].append(board)
 
     def return_game_json(self) -> dict:
         """
@@ -19,13 +42,17 @@ class Game:
         :return: dict
         """
         game_json = {
-            "id": self.id,
+            "key": self.key,
             "code": self.code,
             "max_players": self.max_players,
             "max_watchers": self.max_watchers,
             "players": f"{len(self.players)}/{self.max_players}",
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
-            "components": self.components
+            "components": {
+                "fixed" : {
+                    "boards": [board.return_json() for board in self.components["fixed"]["boards"]]
+                }
+            }
         }
         return game_json
 
