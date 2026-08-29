@@ -1,17 +1,17 @@
-class Token:
-    # tokens are objects that can be moved, flipped
-    def __init__(self, x, y, front_image, back_image, width, height):
+class Card:
+    def __init__(self, x, y, front_scr, back_src, width, height, orientation):
+        # cards are objects that can be moved, flipped, tapped
         self.x = x
         self.y = y
-        self.side = 'front'
+        self.orientation = orientation
+        self.side = 'back'
         self.image_src = {
-            "front": front_image,
-            "back": back_image
+            "front": front_scr,
+            "back": back_src
         }
         self.src = self.image_src[self.side]
         self.width = width
         self.height = height
-        self.orientation = 0
 
     def flip(self):
         if self.side == 'front':
@@ -19,11 +19,13 @@ class Token:
             self.src = self.image_src[self.side]
         else:
             self.side = 'front'
-            self.src = self.image_src[self.side]
 
     def move(self, x, y):
         self.x = x
         self.y = y
+
+    def tap(self, orientation):
+        self.orientation = orientation
 
     def return_json(self) -> dict:
         return {

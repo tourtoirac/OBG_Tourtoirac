@@ -1,5 +1,6 @@
 import json
 import logging
+import requests
 
 from autobahn.twisted.websocket import (
     WebSocketServerProtocol,
@@ -9,7 +10,6 @@ from autobahn.twisted.websocket import (
 
 from lobby import Lobby
 from user import User
-from game import Game
 
 from twisted.internet import reactor
 
@@ -145,4 +145,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logger.info("Starting server...")
     main()
