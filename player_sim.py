@@ -1,7 +1,11 @@
 import asyncio
 import json
+import sys
 
 import websockets
+
+print("Python :", sys.executable)
+print("Version :", sys.version)
 
 
 WEBSOCKET_URL = "ws://localhost:12201"
