@@ -1,7 +1,6 @@
-import requests
+import json
 import uuid
 
-from chabanas import Chabanas
 from game import Game
 from user import User
 
@@ -15,12 +14,12 @@ class Lobby:
         self.logger = logger
         self.chabanas = chabanas
 
-    def return_json(self):
+    def return_json(self, sat_list):
         """
         Returns a description of the lobby.
         """
         return {
-            "active": self.chabanas.get_lobby_active_games(),
+            "active": self.chabanas.get_lobby_active_games(sat_list),
         }
 
     def create_game(self, game_name: str, user: User, key: str = None):
@@ -56,6 +55,26 @@ class Lobby:
 
     def delete_user(self, user: User):
         if user.protocol in self.users:
-            if user.game.key is not None:
+            if user.game is not None and user.game.key is not None:
                 self.games[user.game].remove_user(user)
             del self.users[user.protocol]
+
+    def send_keep_alive(self):
+        message = {
+            "action": "keep_alive"
+        }
+
+        encoded = json.dumps(message).encode("utf-8")
+
+        for user in self.users.values():
+
+            try:
+                user.protocol.sendMessage(
+                    encoded,
+                    isBinary=False
+                )
+
+            except Exception as error:
+                self.logger.error(
+                    f"[KEEP_ALIVE] Error sending message to {user.name}: {error}"
+                )

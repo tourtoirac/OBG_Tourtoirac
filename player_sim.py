@@ -1,23 +1,21 @@
 import asyncio
 import json
-import sys
 
 import websockets
-
-print("Python :", sys.executable)
-print("Version :", sys.version)
-
 
 WEBSOCKET_URL = "ws://localhost:12201"
 
 
 async def main():
     async with websockets.connect(WEBSOCKET_URL) as websocket:
+        # message = {
+        #     "action": "start_game",
+        #     "game_name": "waterloo",
+        #     "player": "Chins",
+        #     "key": "123456789",
+        # }
         message = {
-            "action": "start_game",
-            "game_name": "waterloo",
-            "player": "Chins",
-            "key": "123456789",
+            "action": "get_lobby",
         }
 
         # Envoi du message

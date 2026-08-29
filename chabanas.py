@@ -36,12 +36,15 @@ class Chabanas:
             return False
 
 
-    def get_lobby_active_games(self):
+    def get_lobby_active_games(self, sat_list):
+        self.logger.debug("Getting lobby active games")
         lobby_games = {}
         for game in PARAMS['GAMES_LIST']:
             lobby_games[game] = None
             game_list_url = f"{self.host_url}/{game}/list"
-            game_list_data = {}
+            game_list_data = {
+                "sat_list": sat_list
+            }
             response = requests.post(game_list_url, json=game_list_data)
             self.logger.debug(f"Game lobby response: {response.status_code}")
             if response.status_code == 200:
