@@ -50,3 +50,15 @@ class Chabanas:
             if response.status_code == 200:
                 lobby_games[game] = response.json()['games']
         return lobby_games
+
+    def get_game_info(self, game_name, game_code: str):
+        game_creation_url = f"{self.host_url}/{game_name}/get"
+        game_creation_data = {
+            "game_code": game_code,
+        }
+        response = requests.post(game_creation_url, json=game_creation_data)
+        self.logger.debug(f"Game info response: {response.status_code}")
+        if response.status_code == 200:
+            return response.json()['game']
+        else:
+            return False

@@ -57,11 +57,11 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
     def handle_message(self, message):
         action = message.get("action")
         match action:
-            case "start_game":
+            case "start_game": # Creates a new game
                 start_game(self, self.factory.lobby.logger, message)
-            case "get_lobby":
+            case "get_lobby": # get list of available games in lobby
                 get_lobby(self, self.factory.lobby.logger, message, self.factory.lobby.chabanas)
-            case "join_game":
+            case "join_game": # join an available game
                 join_game(self, self.factory.lobby.logger, message)
             case _:
                 self.send_error(

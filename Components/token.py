@@ -1,6 +1,7 @@
 class Token:
     # tokens are objects that can be moved, flipped
-    def __init__(self, x, y, front_image, back_image, width, height):
+    def __init__(self, id, x, y, front_image, back_image, width, height):
+        self.id = id
         self.x = x
         self.y = y
         self.side = 'front'
@@ -27,6 +28,7 @@ class Token:
 
     def return_json(self) -> dict:
         return {
+            "id": self.id,
             "x": self.x,
             "y": self.y,
             "src": self.src,

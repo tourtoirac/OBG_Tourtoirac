@@ -2,6 +2,7 @@ from unittest import loader
 
 from user import User
 from Components.board import Board
+from Components.token import Token
 
 import uuid
 
@@ -22,7 +23,9 @@ class Game:
             "fixed": {
                 "boards": []
             },
-            "movable": [],
+            "movable": {
+                'token': [],
+            },
         }
         self.max_players = game_json["game"]["max_players"]
         self.max_watchers = game_json["game"]["max_watchers"]
@@ -33,8 +36,26 @@ class Game:
 
     def load_game_components(self):
         for component in self.game_json['board']:
-            board = Board(component['id'], component['x'], component['y'], component['width'], component['height'], component['src'])
+            board = Board(
+                component['id'],
+                component['x'],
+                component['y'],
+                component['width'],
+                component['height'],
+                component['src']
+            )
             self.components["fixed"]["boards"].append(board)
+        for component in self.game_json['token']:
+            token = Token(
+                component['id'],
+                component['x'],
+                component['y'],
+                component['front_src'],
+                component['back_src'],
+                component['width'],
+                component['height']
+            )
+            self.components['movable']['token'].append(token)
 
     def return_game_json(self) -> dict:
         """
