@@ -10,8 +10,9 @@ class Chabanas:
 
 
     def get_game_init_info(self, game_name: str, user: User, key: str):
-        game_creation_url = f"{self.host_url}/{game_name}/create"
+        game_creation_url = f"{self.host_url}/game/create"
         game_creation_data = {
+            "game_name": game_name,
             "player_nickname": user.name,
             "player_key": key
         }
@@ -19,17 +20,15 @@ class Chabanas:
         self.logger.debug(f"Game info response: {response.status_code}")
         if response.status_code == 201:
             game_dict = response.json()
-            game_key = game_dict["game_key"]
-            game_code = game_dict["game_code"]
-            game_info_retrieval_url = f"{self.host_url}/{game_name}/get"
+            game_key = game_dict["session_key"]
+            game_info_retrieval_url = f"{self.host_url}/game/get"
             game_info_retrieval_data = {
-                "game_key": game_key,
-                "game_code": game_code
+                "session_code": game_key,
             }
             response = requests.post(game_info_retrieval_url, json=game_info_retrieval_data)
             self.logger.debug(f"Game info response: {response.status_code}")
             if response.status_code == 200:
-                return response.json()['game']
+                return response.json()['session']
             else:
                 return False
         else:
@@ -39,16 +38,15 @@ class Chabanas:
     def get_lobby_active_games(self, sat_list):
         self.logger.debug("Getting lobby active games")
         lobby_games = {}
-        for game in PARAMS['GAMES_LIST']:
-            lobby_games[game] = None
-            game_list_url = f"{self.host_url}/{game}/list"
-            game_list_data = {
-                "sat_list": sat_list
-            }
-            response = requests.post(game_list_url, json=game_list_data)
-            self.logger.debug(f"Game lobby response: {response.status_code}")
-            if response.status_code == 200:
-                lobby_games[game] = response.json()['games']
+        game_list_url = f"{self.host_url}/game/list"
+        game_list_data = {
+            "requested_games": PARAMS['GAMES_LIST'],
+            "sat_list": sat_list
+        }
+        response = requests.post(game_list_url, json=game_list_data)
+        self.logger.debug(f"Game lobby response: {response.status_code}")
+        if response.status_code == 200:
+            lobby_games = response.json()['sessions']
         return lobby_games
 
     def get_game_info(self, game_name, game_code: str):

@@ -89,7 +89,7 @@ class Lobby:
 
     def send_keep_alive(self):
         message = {
-            "action": "keep_alive"
+            "event": "keep_alive"
         }
 
         encoded = json.dumps(message).encode("utf-8")
