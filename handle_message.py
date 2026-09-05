@@ -109,3 +109,48 @@ def start_game(self, logger, message):
             ]
         }
     })
+
+
+def list_game(self, _, message):
+    user = self.factory.lobby.get_user(self)
+    required_fields = ["game_name_list"]
+    for required_field in required_fields:
+        if required_field not in message:
+            self.send_error(
+                "missing_field",
+                f"The list_game message requires a {required_field} field"
+            )
+            return
+    game_name_list = message["game_name_list"]
+
+    if game_name_list is None:
+        self.send_error(
+            "missing_game_name_list",
+            "The list_game message requires a game_name_list"
+        )
+        return
+
+    if not isinstance(game_name_list, list):
+        self.send_error(
+            "missing_game_name_list",
+            "The game_name_list content can't be None"
+        )
+        return
+
+    result, error = self.factory.lobby.list_game(
+        game_name_list,
+    )
+
+    if not result:
+        self.send_error(
+            error,
+            "Unable to retrieve game information"
+        )
+        return
+
+    user.send(
+        {
+            "event": "list_game",
+            "game_list": result['game_list'],
+        }
+    )

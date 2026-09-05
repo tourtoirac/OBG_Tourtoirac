@@ -9,7 +9,7 @@ from autobahn.twisted.websocket import (
 from twisted.internet import reactor, task
 
 from chabanas import Chabanas
-from handle_message import get_lobby, start_game, join_game
+from handle_message import get_lobby, start_game, join_game, list_game
 from lobby import Lobby
 from user import User
 
@@ -57,6 +57,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
     def handle_message(self, message):
         action = message.get("action")
         match action:
+            case "list_game": # Creates a new game
+                list_game(self, self.factory.lobby.logger, message)
             case "start_game": # Creates a new game
                 start_game(self, self.factory.lobby.logger, message)
             case "get_lobby": # get list of available games in lobby

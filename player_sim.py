@@ -8,12 +8,28 @@ WEBSOCKET_URL = "ws://localhost:12201"
 
 async def main():
     async with websockets.connect(WEBSOCKET_URL) as websocket:
+        # message = {
+        #     "action": "game_list",
+        #     "game_name_list": ["waterloo", "diplomacy"],
+        # }
         message = {
             "action": "start_game",
             "game_name": "waterloo",
             "player": "moi",
             "key": "toto",
         }
+        # message = {
+        #     "action": "start_game",
+        #     "game_name": "waterloo",
+        #     "player": "moi",
+        #     "key": "toto",
+        # }
+        # message = {
+        #     "action": "start_game",
+        #     "game_name": "waterloo",
+        #     "player": "moi",
+        #     "key": "toto",
+        # }
 
         # Envoi du message
         await websocket.send(json.dumps(message))

@@ -1,6 +1,7 @@
 import json
 import uuid
 
+from chabanas import Chabanas
 from game import Game
 from user import User
 
@@ -74,6 +75,13 @@ class Lobby:
     def remove_game(self, game: Game):
         if game in self.games:
             del self.games[game]
+
+    def list_game(self, game_name_list: list):
+        game_list = self.chabanas.get_game_list(game_name_list)
+        if game_list:
+            return game_list, None
+        else:
+            return False, "Unable to retrieve game information"
 
     def add_user(self, user: User):
         self.users[user.protocol] = user
