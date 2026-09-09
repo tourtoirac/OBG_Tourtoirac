@@ -1,67 +1,24 @@
-from game import Game
+from session import Session
 
-
-def get_lobby(self, logger, message, chabanas):
-    logger.debug("Process get_lobby message")
+def list_sessions(self, logger, message):
+    logger.debug("Process list_sessions message")
     user = self.factory.lobby.get_user(self)
-    lobby_info = self.factory.lobby.return_json(sat_list=[])
-    user.send(
-        {
-            "event": "lobby_info_plop",
-            "content": lobby_info
-        }
-    )
-
-
-def join_game(self, logger, message):
-    user = self.factory.lobby.get_user(self)
-    required_fields = ["game_name", "game_code", "player_name", "player_key"]
-    for required_field in required_fields:
-        if required_field not in message:
-            self.send_error(
-                "missing_field",
-                f"The start message requires a {required_field} field"
-            )
-            return
-
-    game_name = message["game_name"]
-    game_code = message["game_code"]
-    user.name = message["player_name"]
-    player_key = message["player_key"]
-
-    game = None
-    error = None
-    logger.debug(f"Trying to find opened game with code {game_code}")
-    for current_game in self.factory.lobby.games:
-        if current_game.code == game_code:
-            game = current_game
-            break
-
-    if game is None:
-        logger.debug(f"Game with code {game_code} not started")
-        result, game = self.factory.lobby.start_game(
-            game_name,
-            game_code,
-            user,
-            player_key
-        )
-
-    if not isinstance(game, Game):
+    if 'game_name_list' not in message or not isinstance(message['game_name_list'], list):
         self.send_error(
-            game,
-            f"Unable to join game {game_code}"
+            "missing_field",
+            "The list_sessions message requires a game_name_list list field"
         )
         return
 
-    logger.debug(f"{user.name} joined game {game_code}")
+    sessions_info = self.factory.lobby.return_active_sessions(message['game_name_list'], sat_list=[])
+    user.send(
+        {
+            "event": "sessions_info",
+            "content": sessions_info
+        }
+    )
 
-    user.send({
-        "event": "joined",
-        "game": game.return_game_json()
-    })
-
-
-def start_game(self, logger, message):
+def create_session(self, logger, message):
     user = self.factory.lobby.get_user(self)
     required_fields = ["game_name", "player", "key"]
     for required_field in required_fields:
@@ -81,7 +38,7 @@ def start_game(self, logger, message):
             "The start message requires a game_name"
         )
         return
-    success, error = self.factory.lobby.create_game(
+    success, error = self.factory.lobby.create_session(
         game_name,
         user,
         key
@@ -96,18 +53,66 @@ def start_game(self, logger, message):
     logger.debug(f"{user.name} joined game {game_name}")
 
     user.send({
-        "event": "joined",
-        "game": {
-            "key": user.game.key,
-            "game_json": user.game.game_json,
+        "event": "session_created",
+        "session": {
+            "key": user.session.key,
+            "game_json": user.session.game_json,
             "users": [
                 {
                     "id": user.id,
                     "name": user.name
                 }
-                for user in user.game.players
+                for user in user.session.players
             ]
         }
+    })
+
+def join_session(self, logger, message):
+    user = self.factory.lobby.get_user(self)
+    required_fields = ["session_code", "nickname", "key", "role"]
+    for required_field in required_fields:
+        if required_field not in message:
+            self.send_error(
+                "missing_field",
+                f"The start message requires a {required_field} field"
+            )
+            return
+
+    session_code = message["session_code"]
+    user.name = message["nickname"]
+    player_key = message["key"]
+    role = message["role"]
+
+    session = None
+    logger.debug(f"Trying to find opened session with code {session_code}")
+    for current_session in self.factory.lobby.sessions:
+        if current_session.code == session_code:
+            session = current_session
+            break
+
+    if session is None:
+        logger.debug(f"Session with code {session_code} not found. Checking if it can be started")
+        session, error = self.factory.lobby.start_session(
+            session_code,
+            user,
+            role,
+            player_key,
+        )
+
+    if not isinstance(session, Session):
+        self.send_error(
+            error,
+            f"Unable to join session {session_code}"
+        )
+        return
+
+
+
+    logger.debug(f"{user.name} joined session {session_code}")
+
+    user.send({
+        "event": "session_joined",
+        "game": session.return_session_json()
     })
 
 
@@ -140,7 +145,6 @@ def list_game(self, _, message):
     result, error = self.factory.lobby.list_game(
         game_name_list,
     )
-
     if not result:
         self.send_error(
             error,
@@ -151,6 +155,6 @@ def list_game(self, _, message):
     user.send(
         {
             "event": "list_game",
-            "game_list": result['game_list'],
+            "game_list": result,
         }
     )

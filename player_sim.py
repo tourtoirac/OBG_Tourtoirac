@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+from datetime import datetime, timedelta
+
 import websockets
 
 WEBSOCKET_URL = "ws://localhost:12201"
@@ -9,27 +11,25 @@ WEBSOCKET_URL = "ws://localhost:12201"
 async def main():
     async with websockets.connect(WEBSOCKET_URL) as websocket:
         # message = {
-        #     "action": "game_list",
+        #     "action": "list_game",
         #     "game_name_list": ["waterloo", "diplomacy"],
         # }
+        # message = {
+        #     "action": "list_sessions",
+        #     "game_name_list": ["waterloo", "diplomacy"],
+        # }
+        # message = {
+        #     "action": "create_session",
+        #     "game_name": "waterloo",
+        #     "player": f"chins_{datetime.now().strftime('%H%M%S')}",
+        #     "key": "toto",
+        # }
         message = {
-            "action": "start_game",
-            "game_name": "waterloo",
-            "player": "moi",
-            "key": "toto",
+            "action": "join_session",
+            "code": "XXXXX",
+            "player": "XXXX",
+            "key": "XXXX",
         }
-        # message = {
-        #     "action": "start_game",
-        #     "game_name": "waterloo",
-        #     "player": "moi",
-        #     "key": "toto",
-        # }
-        # message = {
-        #     "action": "start_game",
-        #     "game_name": "waterloo",
-        #     "player": "moi",
-        #     "key": "toto",
-        # }
 
         # Envoi du message
         await websocket.send(json.dumps(message))

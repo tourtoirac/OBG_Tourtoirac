@@ -9,7 +9,7 @@ from autobahn.twisted.websocket import (
 from twisted.internet import reactor, task
 
 from chabanas import Chabanas
-from handle_message import get_lobby, start_game, join_game, list_game
+from handle_message import list_sessions, create_session, join_session, list_game
 from lobby import Lobby
 from user import User
 
@@ -57,14 +57,14 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
     def handle_message(self, message):
         action = message.get("action")
         match action:
-            case "list_game": # Creates a new game
+            case "list_game": # Gets the initialization values of the games
                 list_game(self, self.factory.lobby.logger, message)
-            case "start_game": # Creates a new game
-                start_game(self, self.factory.lobby.logger, message)
-            case "get_lobby": # get list of available games in lobby
-                get_lobby(self, self.factory.lobby.logger, message, self.factory.lobby.chabanas)
-            case "join_game": # join an available game
-                join_game(self, self.factory.lobby.logger, message)
+            case "list_sessions": # get list of available sessions in lobby
+                list_sessions(self, self.factory.lobby.logger, message)
+            case "create_session": # Creates a new session for a game
+                create_session(self, self.factory.lobby.logger, message)
+            case "join_session": # join an active session
+                join_session(self, self.factory.lobby.logger, message)
             case _:
                 self.send_error(
                     "unknown_action",
@@ -88,7 +88,7 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
     def onClose(self, was_clean, code, reason):
         logger.info(f"Closed connection : clean={was_clean}, code={code}, reason={reason}")
         user = self.factory.lobby.get_user(self)
-        logger.info(f"[LOBBY] Deleting user : {user.name}")
+        logger.info("[LOBBY] Deleting user")
         self.factory.lobby.delete_user(
             user
         )
