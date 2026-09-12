@@ -23,22 +23,22 @@ class Lobby:
             "active": self.chabanas.get_active_sessions(game_name_list, sat_list),
         }
 
-    def start_session(self, game_code: str, user: User, role: str, key: str = None):
-        # checks if a session can be started with that user
-        session_info = self.chabanas.get_session_info(game_code)
+    def create_session(self, game_code: str, user: User, key: str = ""):
+        # checks if a session can be created with that user
+        session_info = self.chabanas.create_session(game_code, user, key)
         if session_info:
-            if role == "player":
-                # checks that the user is part of the players or there are seats available for that session
-                pass
-
             session = Session(
-                name=session_info['game_name'],
+                user=user,
+                name=session_info['name'],
                 key=session_info["key"],
                 code=session_info["code"],
-                player=user,
+                active=session_info["active"],
+                variant=session_info["variant"],
                 game_json=session_info['game_json']
             )
+
             user.session = session
+
             self.add_session(session)
             self.sessions[session.key].add_user(user, "player")
             return True, None
@@ -84,3 +84,4 @@ class Lobby:
                 self.logger.error(
                     f"[KEEP_ALIVE] Error sending message to {user.name}: {error}"
                 )
+                self.delete_user(user)

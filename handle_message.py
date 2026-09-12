@@ -38,6 +38,7 @@ def create_session(self, logger, message):
             "The start message requires a game_name"
         )
         return
+
     success, error = self.factory.lobby.create_session(
         game_name,
         user,

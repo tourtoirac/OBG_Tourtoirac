@@ -10,10 +10,12 @@ import uuid
 class Session:
     def __init__(
             self,
+            user: User,
             name: str,
             key: str,
             code: str,
-            player: User,
+            active: bool,
+            variant: str,
             game_json: dict,
             ):
         self.key = key
@@ -29,7 +31,9 @@ class Session:
         }
         self.max_players = game_json["game"]["max_players"]
         self.max_watchers = game_json["game"]["max_watchers"]
-        self.players = [player]
+        self.active = active
+        self.variant = variant
+        self.players = []
         self.watchers = []
         self.game_json = game_json
         self.empty_since = None

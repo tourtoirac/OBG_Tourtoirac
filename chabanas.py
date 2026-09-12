@@ -9,7 +9,8 @@ class Chabanas:
         self.host_url = "http://obg-chabanas:80" # NOSONAR
 
 
-    def get_session_init_info(self, game_name: str, user: User, key: str):
+    def create_session(self, game_name: str, user: User, key: str):
+        # Try creating a session
         session_creation_url = f"{self.host_url}/session/create"
         session_creation_data = {
             "game_name": game_name,
@@ -49,10 +50,10 @@ class Chabanas:
             lobby_sessions = response.json()['sessions']
         return lobby_sessions
 
-    def get_session_info(self, game_code: str):
+    def get_session_info(self, session_code: str):
         session_get_url = f"{self.host_url}/session/get"
         session_get_data = {
-            "game_code": game_code,
+            "session_code": session_code,
             "sat_list": ["game_json"]
         }
         response = requests.post(session_get_url, json=session_get_data)
