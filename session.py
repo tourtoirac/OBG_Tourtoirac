@@ -77,6 +77,9 @@ class Session:
             "components": {
                 "fixed" : {
                     "boards": [board.return_json() for board in self.components["fixed"]["boards"]]
+                },
+                "movable": {
+                    "token": [token.return_json() for token in self.components['movable']['token']]
                 }
             }
         }

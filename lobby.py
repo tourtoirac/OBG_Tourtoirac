@@ -23,9 +23,9 @@ class Lobby:
             "active": self.chabanas.get_active_sessions(game_name_list, sat_list),
         }
 
-    def create_session(self, game_code: str, user: User, key: str = ""):
+    def create_session(self, game_name: str, user: User, key: str = ""):
         # checks if a session can be created with that user
-        session_info = self.chabanas.create_session(game_code, user, key)
+        session_info = self.chabanas.create_session(game_name, user, key)
         if session_info:
             session = Session(
                 user=user,
@@ -44,6 +44,40 @@ class Lobby:
             return True, None
         else:
             return False, "Unable to create session"
+
+
+    def join_session(self, session_code: str, user: User, key: str = ""):
+        session = None
+        self.logger.debug(f"Trying to find opened session with code {session_code}")
+
+        for current_session in self.sessions:
+            if current_session.code == session_code:
+                session = current_session
+                break
+
+        if session is None:
+            # checks if a user can join an already existing session
+            self.logger.debug(f"Session with code {session_code} not found. Checking if it can be started")
+            session_info = self.chabanas.join_session(session_code, user, key)
+            if session_info:
+                session = Session(
+                    user=user,
+                    name=session_info['name'],
+                    key=session_info["key"],
+                    code=session_info["code"],
+                    active=session_info["active"],
+                    variant=session_info["variant"],
+                    game_json=session_info['game_json']
+                )
+            else:
+                return False, "Unable to join session"
+
+        user.session = session
+
+        self.add_session(session)
+        self.sessions[session.key].add_user(user, "player")
+        return True
+
 
     def add_session(self, session: Session):
         if session.key not in self.sessions:

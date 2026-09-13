@@ -19,6 +19,7 @@ def list_sessions(self, logger, message):
     )
 
 def create_session(self, logger, message):
+    logger.debug("Process create_session message")
     user = self.factory.lobby.get_user(self)
     required_fields = ["game_name", "player", "key"]
     for required_field in required_fields:
@@ -39,11 +40,14 @@ def create_session(self, logger, message):
         )
         return
 
+    print("1")
     success, error = self.factory.lobby.create_session(
         game_name,
         user,
         key
     )
+    print(success)
+    print("2")
 
     if not success:
         self.send_error(
@@ -57,7 +61,7 @@ def create_session(self, logger, message):
         "event": "session_created",
         "session": {
             "key": user.session.key,
-            "game_json": user.session.game_json,
+            "session": user.session.return_session_json(),
             "users": [
                 {
                     "id": user.id,
@@ -84,37 +88,22 @@ def join_session(self, logger, message):
     player_key = message["key"]
     role = message["role"]
 
-    session = None
-    logger.debug(f"Trying to find opened session with code {session_code}")
-    for current_session in self.factory.lobby.sessions:
-        if current_session.code == session_code:
-            session = current_session
-            break
+    success, error = self.factory.lobby.join_session(
+        session_code,
+        user,
+        player_key,
+    )
 
-    if session is None:
-        logger.debug(f"Session with code {session_code} not found. Checking if it can be started")
-        session, error = self.factory.lobby.start_session(
-            session_code,
-            user,
-            role,
-            player_key,
-        )
-
-    if not isinstance(session, Session):
+    if not success:
         self.send_error(
-            error,
-            f"Unable to join session {session_code}"
+            f"unable to join session - {error}"
         )
-        return
-
-
-
-    logger.debug(f"{user.name} joined session {session_code}")
-
-    user.send({
-        "event": "session_joined",
-        "game": session.return_session_json()
-    })
+    else:
+        logger.debug(f"{user.name} joined session {session_code}")
+        user.send({
+            "event": "session_joined",
+            "game": user.session.return_session_json()
+        })
 
 
 def list_game(self, _, message):

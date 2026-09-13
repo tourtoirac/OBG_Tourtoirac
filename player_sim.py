@@ -18,18 +18,19 @@ async def main():
         #     "action": "list_sessions",
         #     "game_name_list": ["waterloo", "diplomacy"],
         # }
-        # message = {
-        #     "action": "create_session",
-        #     "game_name": "waterloo",
-        #     "player": f"chins_{datetime.now().strftime('%H%M%S')}",
-        #     "key": "toto",
-        # }
         message = {
-            "action": "join_session",
-            "code": "XXXXX",
-            "player": "XXXX",
-            "key": "XXXX",
+            "action": "create_session",
+            "game_name": "waterloo",
+            "nickname": f"chins_{datetime.now().strftime('%H%M%S')}",
+            "key": "toto",
         }
+        # message = {
+        #     "action": "join_session",
+        #     "session_code": "WKL1A87E",
+        #     "nickname": "Chins 002",
+        #     "key": "123456",
+        #     "role": "player"
+        # }
 
         # Envoi du message
         await websocket.send(json.dumps(message))

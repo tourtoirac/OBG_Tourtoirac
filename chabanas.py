@@ -36,6 +36,22 @@ class Chabanas:
             return False
 
 
+    def join_session(self, session_code: str, user: User, key: str):
+        # Call back-end to find out if user can join a session
+        session_join_url = f"{self.host_url}/session/join"
+        session_join_data = {
+            "session_code": session_code,
+            "nickname": user.name,
+            "key": key
+        }
+        response = requests.post(session_join_url, json=session_join_data)
+        self.logger.debug(f"Session info response: {response.status_code}")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return False
+
+
     def get_active_sessions(self, game_name_list, sat_list):
         self.logger.debug("Getting lobby active sessions")
         lobby_sessions = {}
