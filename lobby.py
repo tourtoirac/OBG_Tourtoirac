@@ -65,7 +65,13 @@ class Lobby:
     def delete_user(self, user: User):
         if user.protocol in self.users:
             if user.session is not None and user.session.key is not None:
-                self.sessions[user.session].remove_user(user)
+                session = self.sessions.get(user.session.key)
+                if session is not None:
+                    session.remove_user(user)
+                else:
+                    self.logger.warning(
+                        f"[DELETE_USER] Session {user.session.key} not found in lobby for user {user.name}"
+                    )
             del self.users[user.protocol]
 
     def send_keep_alive(self):
