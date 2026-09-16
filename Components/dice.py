@@ -2,7 +2,9 @@ import random
 
 class Dice:
     # dice can be moved, rolled
-    def __init__(self, x, y, src, width, height, src_list):
+    def __init__(self, id, x, y, src, width, height, src_list):
+        self.id = id
+        self.kind = 'dice'
         self.x = x
         self.y = y
         self.src = src_list[0]
@@ -19,6 +21,8 @@ class Dice:
 
     def return_json(self) -> dict:
         return {
+            "kind": self.kind,
+            "id": self.id,
             "x": self.x,
             "y": self.y,
             "src": self.src,

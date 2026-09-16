@@ -1,6 +1,7 @@
 class Board:
     # boards are immovable images
     def __init__(self, id, x, y, src, height, width):
+        self.kind = 'board'
         self.x = x
         self.y = y
         self.id = id
@@ -10,6 +11,7 @@ class Board:
 
     def return_json(self) -> dict:
         return {
+            "kind": self.kind,
             "x": self.x,
             "y": self.y,
             "id": self.id,

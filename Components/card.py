@@ -1,6 +1,8 @@
 class Card:
-    def __init__(self, x, y, front_scr, back_src, width, height, orientation):
+    def __init__(self, id, x, y, front_scr, back_src, width, height, orientation):
         # cards are objects that can be moved, flipped, tapped
+        self.id = id
+        self.kind = 'card'
         self.x = x
         self.y = y
         self.orientation = orientation
@@ -29,6 +31,8 @@ class Card:
 
     def return_json(self) -> dict:
         return {
+            "kind": self.kind,
+            "id": self.id,
             "x": self.x,
             "y": self.y,
             "src": self.src,

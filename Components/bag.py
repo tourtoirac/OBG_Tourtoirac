@@ -3,7 +3,9 @@ import random
 class Bag:
     # bags contains objects and release them randomly
     # fixed object
-    def __init__(self, x, y, width, height, image_src):
+    def __init__(self, id, x, y, width, height, image_src):
+        self.kind = 'bag'
+        self.id = id
         self.x = x
         self.y = y
         self.src = image_src
@@ -13,6 +15,8 @@ class Bag:
 
     def return_json(self) -> dict:
         return {
+            "kind": self.kind,
+            "id": self.id,
             "x": self.x,
             "y": self.y,
             "src": self.src,

@@ -6,7 +6,9 @@ class Deck:
     # decks contains cards
     # fixed or movable
     # fixed object
-    def __init__(self, x, y, src, width, height, image_src, fixed=False):
+    def __init__(self, id, x, y, src, width, height, image_src, fixed= False):
+        self.id = id
+        self.kind = 'deck'
         self.x = x
         self.y = y
         self.src = image_src
@@ -18,6 +20,8 @@ class Deck:
 
     def return_json(self) -> dict:
         return {
+            "kind": self.kind,
+            "id": self.id,
             "x": self.x,
             "y": self.y,
             "src": self.src,
