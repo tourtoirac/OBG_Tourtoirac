@@ -21,16 +21,17 @@ def list_sessions(self, logger, message):
 def create_session(self, logger, message):
     logger.debug("Process create_session message")
     user = self.factory.lobby.get_user(self)
-    required_fields = ["game_name", "player", "key"]
+    required_fields = ["game_name", "nickname", "key"]
     for required_field in required_fields:
         if required_field not in message:
+            logger.error(f"The start message requires a {required_field} field")
             self.send_error(
                 "missing_field",
                 f"The start message requires a {required_field} field"
             )
             return
     game_name = message["game_name"]
-    user.name = message["player"]
+    user.name = message["nickname"]
     key = message["key"]
 
     if game_name is None:
@@ -40,14 +41,11 @@ def create_session(self, logger, message):
         )
         return
 
-    print("1")
     success, error = self.factory.lobby.create_session(
         game_name,
         user,
         key
     )
-    print(success)
-    print("2")
 
     if not success:
         self.send_error(
@@ -57,20 +55,13 @@ def create_session(self, logger, message):
         return
     logger.debug(f"{user.name} joined game {game_name}")
 
-    user.send({
-        "event": "session_created",
-        "session": {
-            "key": user.session.key,
-            "session": user.session.return_session_json(),
-            "users": [
-                {
-                    "id": user.id,
-                    "name": user.name
-                }
-                for user in user.session.players
-            ]
+
+    user.send(
+        {
+            "event": "session_created",
+            "session": user.session.return_session_json()
         }
-    })
+    )
 
 def join_session(self, logger, message):
     user = self.factory.lobby.get_user(self)

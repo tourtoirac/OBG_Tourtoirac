@@ -12,15 +12,15 @@ async def main():
     async with websockets.connect(WEBSOCKET_URL) as websocket:
         # message = {
         #     "action": "list_game",
-        #     "game_name_list": ["waterloo", "diplomacy"],
+        #     "game_name_list": ["Waterloo", "Diplomacy"],
         # }
         # message = {
         #     "action": "list_sessions",
-        #     "game_name_list": ["waterloo", "diplomacy"],
+        #     "game_name_list": ["Waterloo", "Diplomacy"],
         # }
         message = {
             "action": "create_session",
-            "game_name": "waterloo",
+            "game_name": "Waterloo",
             "nickname": f"chins_{datetime.now().strftime('%H%M%S')}",
             "key": "toto",
         }

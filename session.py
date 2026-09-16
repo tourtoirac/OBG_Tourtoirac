@@ -21,14 +21,11 @@ class Session:
         self.key = key
         self.name = name
         self.code = code
-        self.components = {
-            "fixed": {
-                "boards": []
-            },
-            "movable": {
-                'token': [],
-            },
+        self.components_lists = {
+            "fixed": [],
+            "movable": [],
         }
+        self.components_dict = {}
         self.max_players = game_json["game"]["max_players"]
         self.max_watchers = game_json["game"]["max_watchers"]
         self.active = active
@@ -40,27 +37,33 @@ class Session:
         self.load_session_components()
 
     def load_session_components(self):
-        for component in self.game_json['board']:
-            board = Board(
-                component['id'],
-                component['x'],
-                component['y'],
-                component['width'],
-                component['height'],
-                component['src']
-            )
-            self.components["fixed"]["boards"].append(board)
-        for component in self.game_json['token']:
-            token = Token(
-                component['id'],
-                component['x'],
-                component['y'],
-                component['front_src'],
-                component['back_src'],
-                component['width'],
-                component['height']
-            )
-            self.components['movable']['token'].append(token)
+        for component in self.game_json['fixed']:
+            match component['kind']:
+                case 'board':
+                    game_component = Board(
+                        component['id'],
+                        component['x'],
+                        component['y'],
+                        component['src'],
+                        component['width'],
+                        component['height']
+                    )
+                    self.components_lists["fixed"].append(game_component)
+                    self.components_dict[component['id']] = game_component
+        for component in self.game_json['movable']:
+            match component['kind']:
+                case 'token':
+                    game_component = Token(
+                        component['id'],
+                        component['x'],
+                        component['y'],
+                        component['front_src'],
+                        component['back_src'],
+                        component['width'],
+                        component['height']
+                    )
+                    self.components_lists['movable'].append(game_component)
+                    self.components_dict[component['id']] = game_component
 
     def return_session_json(self) -> dict:
         """
@@ -75,12 +78,8 @@ class Session:
             "players": f"{len(self.players)}/{self.max_players}",
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
             "components": {
-                "fixed" : {
-                    "boards": [board.return_json() for board in self.components["fixed"]["boards"]]
-                },
-                "movable": {
-                    "token": [token.return_json() for token in self.components['movable']['token']]
-                }
+                "fixed" : [component.return_json() for component in self.components_lists["fixed"]],
+                "movable": [component.return_json() for component in self.components_lists['movable']]
             }
         }
         return session_json
