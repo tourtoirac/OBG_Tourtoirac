@@ -9,7 +9,8 @@ params = {
     "SEND_KEEPALIVE": True,
     "LOOPED_KEEP_ALIVE": 30,
     "GAMES_LIST" : [
-        "waterloo",
-        "diplomacy"
+        "Waterloo",
+        "Diplomacy",
+        "Vietnam",
     ],
 }
