@@ -124,6 +124,16 @@ def main():
     )
 
     keep_alive_loop.start(30.0)
+
+    # Graceful shutdown : on SIGTERM/SIGINT, the Twisted reactor stops,
+    # notify all users and disconnect them before the process exits
+    reactor.addSystemEventTrigger(
+        'before',
+        'shutdown',
+        lobby.shutdown
+    )
+    logger.info("[SERVER] Shutdown handler registered")
+
     reactor.run()
 
 

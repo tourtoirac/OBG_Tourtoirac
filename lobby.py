@@ -108,6 +108,32 @@ class Lobby:
                     )
             del self.users[user.protocol]
 
+    def shutdown(self):
+        """
+        Notifies all connected users and disconnects them gracefully.
+        Called by the reactor shutdown trigger.
+        """
+        self.logger.info("[SERVER] Shutdown initiated, notifying all users")
+        message = {
+            "event": "server_shutdown",
+            "reason": "Server is shutting down"
+        }
+        encoded = json.dumps(message).encode("utf-8")
+        for user in list(self.users.values()):
+            try:
+                user.protocol.sendMessage(
+                    encoded,
+                    isBinary=False
+                )
+                user.protocol.sendClose()
+            except Exception as error:
+                self.logger.error(
+                    f"[SHUTDOWN] Error notifying user {user.name}: {error}"
+                )
+        self.users.clear()
+        self.sessions.clear()
+        self.logger.info("[SERVER] All users disconnected")
+
     def send_keep_alive(self):
         self.logger.debug("Sending keep alive message")
         message = {
