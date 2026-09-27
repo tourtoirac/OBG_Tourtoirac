@@ -1,8 +1,11 @@
-class Token:
+from Components.component import Component
+from user import User
+
+class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, id, x, y, front_image, back_image, width, height):
+    def __init__(self, x, y, front_image, back_image, width, height):
+        super().__init__(id)
         self.kind = 'token'
-        self.id = id
         self.x = x
         self.y = y
         self.side = 'front'
@@ -14,20 +17,34 @@ class Token:
         self.width = width
         self.height = height
         self.orientation = 0
+        self.acquired_by = None
+        self.coordinates = (self.x, self.y)
+
+    def acquire(self, user: User):
+        if self.acquired_by is None or self.acquired_by == user:
+            self.acquired_by = user
+        user.acquire(self.id)
 
     def flip(self):
-        if self.side == 'front':
+        if self.side == 'front' and self.image_src['back'] is not None:
             self.side = 'back'
             self.src = self.image_src[self.side]
         else:
             self.side = 'front'
             self.src = self.image_src[self.side]
 
-    def move(self, x, y):
-        self.x = x
-        self.y = y
+    def move(self, x, y, user: User):
+        if self.acquired_by == user:
+            self.x = x
+            self.y = y
+            self.coordinates = (self.x, self.y)
 
-    def return_json(self) -> dict:
+    def release(self, user: User):
+        if self.acquired_by == user:
+            self.acquired_by = None
+            user.release(self.id)
+
+    def return_json(self, sat_list = None) -> dict:
         return {
             "id": self.id,
             "kind": self.kind,

@@ -1,4 +1,7 @@
+from Components.component import Component
 from session import Session
+from user import User
+
 
 def list_sessions(self, logger, message):
     logger.debug("Process list_sessions message")
@@ -54,7 +57,6 @@ def create_session(self, logger, message):
         )
         return
     logger.debug(f"{user.name} joined game {game_name}")
-
 
     user.send(
         {
@@ -139,3 +141,70 @@ def list_game(self, _, message):
             "game_list": result,
         }
     )
+
+
+def acquire(self, _, message):
+    user = self.factory.lobby.get_user(self)
+    component_id = message["component_id"]
+    component = user.session.get_component(component_id)
+    if component:
+        component.acquire(user)
+        acquire_message = {
+                    "event": "acquire",
+                    "component_id" : component_id,
+                    "user": user.id,
+                }
+        if component_id in user.acquired:
+            acquire_message["success"] = True
+        else:
+            acquire_message["success"] = False
+        user.session.send(acquire_message)
+    else:
+        self.send_error(
+            "component_not_found",
+            f"Component {component_id} not found"
+        )
+
+def release(self, _, message):
+    user = self.factory.lobby.get_user(self)
+    component_id = message["component_id"]
+    component = user.session.get_component(component_id)
+    if component:
+        component.release(user)
+        release_message = {
+                    "event": "release",
+                    "component_id" : component_id,
+                    "component_json" : component.return_json(),
+                    "user": user.id,
+                }
+        if component_id in user.acquired:
+            release_message["success"] = True
+        else:
+            release_message["success"] = False
+        user.session.send(release_message)
+    else:
+        self.send_error(
+            "component_not_found",
+            f"Component {component_id} not found"
+        )
+
+
+def move(self, _, message):
+    user = self.factory.lobby.get_user(self)
+    component_id = message["component_id"]
+    x = message["x"]
+    y = message["y"]
+    component = user.session.get_component(component_id)
+    if component:
+        component.move(x, y, user)
+        move_message = {
+                    "event": "move",
+                    "component_id" : component_id,
+                    "coordinates" : component.return_json(),
+                }
+        user.session.send_others(user, move_message)
+    else:
+        self.send_error(
+            "component_not_found",
+            f"Component {component_id} not found"
+        )

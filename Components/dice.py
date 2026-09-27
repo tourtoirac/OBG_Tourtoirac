@@ -1,8 +1,11 @@
 import random
+from Components.component import Component
+from user import User
 
-class Dice:
+class Dice(Component):
     # dice can be moved, rolled
     def __init__(self, id, x, y, src, width, height, src_list):
+        super().__init__(id)
         self.id = id
         self.kind = 'dice'
         self.x = x
@@ -11,15 +14,10 @@ class Dice:
         self.width = width
         self.height = height
         self.src_list = src_list
+        self.acquired_by = None
+        self.coordinates = (x, y)
 
-    def move(self, x, y):
-        self.x = x
-        self.y = y
-
-    def roll(self):
-        self.src = random.choice(self.src_list)  # NOSONAR
-
-    def return_json(self) -> dict:
+    def return_json(self, sat_list = None) -> dict:
         return {
             "kind": self.kind,
             "id": self.id,
@@ -29,3 +27,12 @@ class Dice:
             "width": self.width,
             "height": self.height
         }
+
+    def move(self, x, y, user: User):
+        if self.acquired_by == user:
+            self.x = x
+            self.y = y
+            self.coordinates = (self.x, self.y)
+
+    def roll(self):
+        self.src = random.choice(self.src_list)  # NOSONAR

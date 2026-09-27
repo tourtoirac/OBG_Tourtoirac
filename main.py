@@ -9,7 +9,7 @@ from autobahn.twisted.websocket import (
 from twisted.internet import reactor, task
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, list_game
+from handle_message import list_sessions, create_session, join_session, list_game, acquire, release, move
 from lobby import Lobby
 from user import User
 
@@ -65,6 +65,12 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 create_session(self, self.factory.lobby.logger, message)
             case "join_session": # join an active session
                 join_session(self, self.factory.lobby.logger, message)
+            case "acquire": # associate a component to a user
+                acquire(self, self.factory.lobby.logger, message)
+            case "release": # release a component from a user
+                release(self, self.factory.lobby.logger, message)
+            case "move": # change the x and y value of a component
+                move(self, self.factory.lobby.logger, message)
             case _:
                 self.send_error(
                     "unknown_action",

@@ -26,9 +26,9 @@ async def main():
         }
         # message = {
         #     "action": "join_session",
-        #     "session_code": "WKL1A87E",
-        #     "nickname": "Chins 002",
-        #     "key": "123456",
+        #     "session_code": "ZJCBX16H",
+        #     "nickname": "Chins 004",
+        #     "key": "",
         #     "role": "player"
         # }
 

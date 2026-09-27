@@ -76,7 +76,7 @@ class Lobby:
 
         self.add_session(session)
         self.sessions[session.key].add_user(user, "player")
-        return True
+        return True, None
 
 
     def add_session(self, session: Session):

@@ -7,6 +7,37 @@ class User:
         self.name = name
         self.protocol = protocol
         self.session = None
+        self.acquired = []
+
+    def return_user_json(self) -> dict:
+        """
+        returns a JSON representation of the user
+        :return: dict
+        """
+        user_json = {
+            "id": self.id,
+            "name": self.name,
+            "session": self.session.key,
+            "acquired": self.acquired
+        }
+        return user_json
+
+    def acquire(self, component_id):
+        """
+        Adds the component id to the acquired list
+        """
+        self.acquired.append(component_id)
+
+
+    def release(self, component_id):
+        """
+        Removes the component id from the acquired list
+        """
+        if component_id in self.acquired:
+            self.acquired.remove(component_id)
+
+    def return_acquired(self) -> list:
+        return self.acquired
 
     def send(self, message):
         """
@@ -19,14 +50,3 @@ class User:
             isBinary=False
         )
 
-    def return_user_json(self) -> dict:
-        """
-        returns a JSON representation of the user
-        :return: dict
-        """
-        user_json = {
-            "id": self.id,
-            "name": self.name,
-            "session": self.session.key
-        }
-        return user_json

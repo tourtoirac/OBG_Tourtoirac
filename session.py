@@ -114,3 +114,19 @@ class Session:
             self.players.remove(user)
         elif user in self.watchers:
             self.watchers.remove(user)
+
+    def send(self, message):
+        for user in self.players:
+            user.send(message)
+        for user in self.watchers:
+            user.send(message)
+
+    def send_others(self, sending_user, message):
+        for user in self.players:
+            if sending_user != user:
+                user.send(message)
+        for user in self.watchers:
+            user.send(message)
+
+    def get_component(self, component_id):
+        return self.components_dict.get(component_id, False)
