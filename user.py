@@ -45,7 +45,7 @@ class User:
         Silently drops the message if the connection is already closed:
         a user can disconnect while an asynchronous back-end call is pending.
         """
-        if self.protocol.isClosed():
+        if not self.protocol.is_connection_open():
             return
 
         payload = json.dumps(message)

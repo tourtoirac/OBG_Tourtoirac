@@ -1,10 +1,5 @@
 from twisted.internet import defer
 
-from Components.component import Component
-from session import Session
-from user import User
-
-
 @defer.inlineCallbacks
 def list_sessions(self, logger, message):
     logger.debug("Process list_sessions message")
@@ -193,7 +188,8 @@ def resolve_component_action(self, message, action, required_fields):
     return user, component, True
 
 
-def acquire(self, _, message):
+def acquire(self, logger, message):
+    logger.debug("Process acquire message")
     user, component, ready = resolve_component_action(
         self, message, "acquire", ["component_id"]
     )
@@ -208,10 +204,12 @@ def acquire(self, _, message):
                 "user": user.id,
                 "success": bool(acquired),
             }
+    logger.debug(acquire_message)
     user.session.send(acquire_message)
 
 
-def release(self, _, message):
+def release(self, logger, message):
+    logger.debug("Process release message")
     user, component, ready = resolve_component_action(
         self, message, "release", ["component_id"]
     )
@@ -227,10 +225,11 @@ def release(self, _, message):
                 "user": user.id,
                 "success": bool(released),
             }
+    logger.debug(release_message)
     user.session.send(release_message)
 
 
-def move(self, _, message):
+def move(self, logger, message):
     user, component, ready = resolve_component_action(
         self, message, "move", ["component_id", "x", "y"]
     )

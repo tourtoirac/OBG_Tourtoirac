@@ -24,8 +24,8 @@ class FakeProtocol:
             raise Exception("connection already closed")
         self.sent.append(payload)
 
-    def isClosed(self):
-        return self.closed
+    def is_connection_open(self):
+        return not self.closed
 
     def sendClose(self):
         self.closed = True

@@ -6,6 +6,7 @@ from autobahn.twisted.websocket import (
     WebSocketServerFactory,
     listenWS,
 )
+from autobahn.websocket.protocol import WebSocketProtocol
 from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
@@ -100,8 +101,16 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
     def log_handler_error(self, failure, action):
         logger.error(f"[HANDLER] Action '{action}' failed: {failure}")
 
+    def is_connection_open(self):
+        """
+        Tells whether the WebSocket session is usable to send a message.
+        autobahn tracks the session in self.state and raises Disconnected from
+        sendMessage() when it is not STATE_OPEN.
+        """
+        return self.state == WebSocketProtocol.STATE_OPEN
+
     def send_error(self, code, message):
-        if self.isClosed():
+        if not self.is_connection_open():
             return
         payload = {
             "event": "error",

@@ -51,16 +51,15 @@ class Protocol(GameWebSocketProtocol):
     def __init__(self, lobby):
         self.sent = []
         self.closed = False
+        self.state = self.STATE_OPEN
         self.factory = GameWebSocketFactory("ws://localhost:9000", lobby)
 
     def sendMessage(self, payload, isBinary=False):
         self.sent.append(json.loads(payload.decode()))
 
-    def isClosed(self):
-        return self.closed
-
     def sendClose(self):
         self.closed = True
+        self.state = self.STATE_CLOSED
 
     # helpers -----------------------------------------------------------
     @property
@@ -277,14 +276,15 @@ class TestComponentActions:
 
 class TestErrorReporting:
     def test_send_error_is_ignored_on_a_closed_connection(self, client):
-        client.closed = True
+        client.state = client.STATE_CLOSED
         client.send_error("code", "message")  # must not raise
         assert client.sent == []
 
     def test_user_send_is_ignored_on_a_closed_connection(self, client, lobby):
         user = lobby.get_user(client)
-        client.closed = True
+        client.state = client.STATE_CLOSED
         user.send({"event": "anything"})  # must not raise
+        assert client.sent == []
 
     def test_an_exception_in_a_handler_is_reported_not_fatal(self, client, monkeypatch):
         def exploding(*args, **kwargs):
@@ -336,3 +336,16 @@ class TestConnectionLifecycle:
         assert client.last_event() == "server_shutdown"
         assert client.closed is True
         assert lobby.users == {}
+
+    def test_is_connection_open_follows_the_websocket_state(self, client):
+        """
+        The connection state is the one autobahn keeps: isClosed() no longer
+        exists on WebSocketServerProtocol.
+        """
+        assert client.is_connection_open() is True
+        client.state = client.STATE_CLOSING
+        assert client.is_connection_open() is False
+        client.state = client.STATE_OPEN
+        client.onClose(True, 1000, "normal")
+        client.state = client.STATE_CLOSED
+        assert client.is_connection_open() is False
