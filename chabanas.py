@@ -1,92 +1,160 @@
-import requests
+import json
 
-from conf import params as PARAMS
+from twisted.internet import defer, reactor
+from twisted.web.client import Agent, readBody
+from twisted.web.http_headers import Headers
+from twisted.web.iweb import IBodyProducer
+from zope.interface import implementer
+
 from user import User
 
+
+@implementer(IBodyProducer)
+class BytesBodyProducer:
+    """
+    Minimal IBodyProducer sending an in-memory payload.
+    Agent.request() only accepts a bodyProducer, and BytesProducer is not
+    available on every Twisted version supported by this service.
+    """
+
+    def __init__(self, body: bytes):
+        self.body = body
+        self.length = len(body)
+
+    def startProducing(self, consumer):
+        consumer.write(self.body)
+        return defer.succeed(None)
+
+    def pauseProducing(self):
+        pass
+
+    def stopProducing(self):
+        pass
+
+    def resumeProducing(self):
+        pass
+
+
 class Chabanas:
-    def __init__(self, logger):
+    def __init__(self, logger, agent=None, timeout=10.0):
         self.logger = logger
         self.host_url = "http://obg-chabanas:80" # NOSONAR
+        self.timeout = timeout
+        self._agent = agent
 
+    def _get_agent(self):
+        if self._agent is None:
+            self._agent = Agent(reactor, connectTimeout=self.timeout)
+        return self._agent
 
+    def _post_json(self, path, payload):
+        """
+        Asynchronously POSTs payload as JSON to the back-end.
+        Fires with the decoded response body, or False on any failure
+        (network error, timeout, undecodable body) so that callers keep
+        a simple truthiness check without risking an unhandled Failure.
+        """
+        url = f"{self.host_url}{path}"
+        body = json.dumps(payload).encode("utf-8")
+        headers = Headers({
+            b"Content-Type": [b"application/json"],
+            b"Accept": [b"application/json"],
+        })
+        deferred = self._get_agent().request(
+            b"POST",
+            url.encode("utf-8"),
+            headers,
+            BytesBodyProducer(body),
+        )
+        deferred.addTimeout(self.timeout, reactor)
+        deferred.addCallback(self._decode_response)
+        deferred.addErrback(self._log_failure, f"POST {url}")
+        return deferred
+
+    def _decode_response(self, response):
+        self.logger.debug(f"Chabanas response: {response.code}")
+        body = readBody(response)
+        body.addCallback(lambda raw: json.loads(raw.decode("utf-8")))
+        body.addErrback(self._log_failure, "Reading chabanas response body")
+        return body
+
+    def _log_failure(self, reason, context):
+        self.logger.error(f"[CHABANAS] {context} failed: {reason}")
+        return False
+
+    def _extract_session(self, payload, default=False):
+        session = payload.get('session') if isinstance(payload, dict) else None
+        if not session:
+            self.logger.error("[CHABANAS] Response has no 'session' field")
+            return default
+        return session
+
+    @defer.inlineCallbacks
     def create_session(self, game_name: str, user: User, key: str):
         # Try creating a session
-        session_creation_url = f"{self.host_url}/session/create"
-        session_creation_data = {
+        created = yield self._post_json("/session/create", {
             "game_name": game_name,
             "nickname": user.name,
             "key": key
-        }
-        response = requests.post(session_creation_url, json=session_creation_data)
-        self.logger.debug(f"Session info response: {response.status_code}")
-        if response.status_code == 201:
-            session_dict = response.json()
-            session_code = session_dict["session_code"]
-            session_info_retrieval_url = f"{self.host_url}/session/get"
-            session_info_retrieval_data = {
-                "session_code": session_code,
-            }
-            response = requests.post(session_info_retrieval_url, json=session_info_retrieval_data)
-            self.logger.debug(f"Session info response: {response.status_code}")
-            if response.status_code == 200:
-                return response.json()['session']
-            else:
-                return False
-        else:
+        })
+        if not created:
             return False
 
+        session_code = created.get("session_code")
+        if not session_code:
+            self.logger.error("[CHABANAS] Response has no 'session_code' field")
+            return False
 
+        session_info = yield self._post_json("/session/get", {
+            "session_code": session_code,
+        })
+        if not session_info:
+            return False
+
+        return self._extract_session(session_info)
+
+    @defer.inlineCallbacks
     def join_session(self, session_code: str, user: User, key: str):
         # Call back-end to find out if user can join a session
-        session_join_url = f"{self.host_url}/session/join"
-        session_join_data = {
+        response = yield self._post_json("/session/join", {
             "session_code": session_code,
             "nickname": user.name,
             "key": key
-        }
-        response = requests.post(session_join_url, json=session_join_data)
-        self.logger.debug(f"Session info response: {response.status_code}")
-        if response.status_code == 200:
-            return response.json()
-        else:
+        })
+        if not response:
             return False
+        return self._extract_session(response)
 
-
+    @defer.inlineCallbacks
     def get_active_sessions(self, game_name_list, sat_list):
         self.logger.debug("Getting lobby active sessions")
-        lobby_sessions = {}
-        session_list_url = f"{self.host_url}/session/list"
-        session_list_data = {
+        response = yield self._post_json("/session/list", {
             "game_name_list": game_name_list,
             "sat_list": sat_list
-        }
-        response = requests.post(session_list_url, json=session_list_data)
-        self.logger.debug(f"Session lobby response: {response.status_code}")
-        if response.status_code == 200:
-            lobby_sessions = response.json()['sessions']
-        return lobby_sessions
+        })
+        if not response:
+            return {}
+        return response.get('sessions', {})
 
+    @defer.inlineCallbacks
     def get_session_info(self, session_code: str):
-        session_get_url = f"{self.host_url}/session/get"
-        session_get_data = {
+        response = yield self._post_json("/session/get", {
             "session_code": session_code,
             "sat_list": ["game_json"]
-        }
-        response = requests.post(session_get_url, json=session_get_data)
-        self.logger.debug(f"Game info response: {response.status_code}")
-        if response.status_code == 200:
-            return response.json()['session']
-        else:
+        })
+        if not response:
             return False
+        return self._extract_session(response)
 
+    @defer.inlineCallbacks
     def get_game_list(self, game_name_list: list):
-        game_list_url = f"{self.host_url}/game/list"
-        game_list_data = {
+        response = yield self._post_json("/game/list", {
             "game_name_list": game_name_list,
-        }
-        response = requests.post(game_list_url, json=game_list_data)
-        self.logger.debug(f"Game list response: {response.status_code}")
-        if response.status_code == 200:
-            return response.json()['game_list']
-        else:
+        })
+        if not response:
             return False
+        game_list = response.get('game_list')
+        if not game_list:
+            self.logger.error("[CHABANAS] Response has no 'game_list' field")
+            return False
+        return game_list

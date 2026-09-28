@@ -1,13 +1,14 @@
 import random
 
 from user import User
-from component import Component
+from Components.component import Component
 
 class Bag(Component):
     # bags contains objects and release them randomly
     # fixed object
-    def __init__(self, id, x, y, width, height, image_src):
-        super().__init__(id)
+    def __init__(self, component_id, x, y, width, height, image_src):
+        super().__init__(component_id)
+        self.id = component_id
         self.kind = 'bag'
         self.x = x
         self.y = y

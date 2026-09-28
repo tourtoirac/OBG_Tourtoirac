@@ -1,6 +1,8 @@
 import json
 import uuid
 
+from twisted.internet import defer
+
 from chabanas import Chabanas
 from session import Session
 from user import User
@@ -15,67 +17,73 @@ class Lobby:
         self.logger = logger
         self.chabanas = chabanas
 
+    @defer.inlineCallbacks
     def return_active_sessions(self, game_name_list, sat_list):
         """
         Returns a list of the active sessions of the lobby
         """
+        active = yield self.chabanas.get_active_sessions(game_name_list, sat_list)
         return {
-            "active": self.chabanas.get_active_sessions(game_name_list, sat_list),
+            "active": active,
         }
 
+    def _build_session(self, session_info):
+        return Session(
+            user=None,
+            name=session_info['name'],
+            key=session_info["key"],
+            code=session_info["code"],
+            active=session_info["active"],
+            variant=session_info["variant"],
+            game_json=session_info['game_json']
+        )
+
+    def _find_session_by_code(self, session_code):
+        for session in self.sessions.values():
+            if session.code == session_code:
+                return session
+        return None
+
+    @defer.inlineCallbacks
     def create_session(self, game_name: str, user: User, key: str = ""):
         # checks if a session can be created with that user
-        session_info = self.chabanas.create_session(game_name, user, key)
-        if session_info:
-            session = Session(
-                user=user,
-                name=session_info['name'],
-                key=session_info["key"],
-                code=session_info["code"],
-                active=session_info["active"],
-                variant=session_info["variant"],
-                game_json=session_info['game_json']
-            )
-
-            user.session = session
-
-            self.add_session(session)
-            self.sessions[session.key].add_user(user, "player")
-            return True, None
-        else:
+        session_info = yield self.chabanas.create_session(game_name, user, key)
+        if not session_info:
             return False, "Unable to create session"
 
+        session = self._build_session(session_info)
+        self.add_session(session)
 
-    def join_session(self, session_code: str, user: User, key: str = ""):
-        session = None
+        success, reason = session.add_user(user, "player")
+        if not success:
+            self.remove_session(session)
+            return False, reason
+
+        user.session = session
+        return True, None
+
+    @defer.inlineCallbacks
+    def join_session(self, session_code: str, user: User, key: str = "", role: str = "player"):
         self.logger.debug(f"Trying to find opened session with code {session_code}")
 
-        for current_session in self.sessions:
-            if current_session.code == session_code:
-                session = current_session
-                break
+        session = self._find_session_by_code(session_code)
 
         if session is None:
             # checks if a user can join an already existing session
             self.logger.debug(f"Session with code {session_code} not found. Checking if it can be started")
-            session_info = self.chabanas.join_session(session_code, user, key)
-            if session_info:
-                session = Session(
-                    user=user,
-                    name=session_info['name'],
-                    key=session_info["key"],
-                    code=session_info["code"],
-                    active=session_info["active"],
-                    variant=session_info["variant"],
-                    game_json=session_info['game_json']
-                )
-            else:
+            session_info = yield self.chabanas.join_session(session_code, user, key)
+            if not session_info:
                 return False, "Unable to join session"
+            session = self._build_session(session_info)
+            self.add_session(session)
+        else:
+            self.logger.debug(f"Session with code {session_code} found in lobby")
+
+        success, reason = session.add_user(user, role)
+        if not success:
+            return False, reason
 
         user.session = session
-
-        self.add_session(session)
-        self.sessions[session.key].add_user(user, "player")
         return True, None
 
 
@@ -83,8 +91,13 @@ class Lobby:
         if session.key not in self.sessions:
             self.sessions[session.key] = session
 
+    def remove_session(self, session: Session):
+        if self.sessions.get(session.key) is session:
+            del self.sessions[session.key]
+
+    @defer.inlineCallbacks
     def list_game(self, game_name_list: list):
-        game_list = self.chabanas.get_game_list(game_name_list)
+        game_list = yield self.chabanas.get_game_list(game_name_list)
         if game_list:
             return game_list, None
         else:
@@ -97,6 +110,8 @@ class Lobby:
         return self.users.get(protocol)
 
     def delete_user(self, user: User):
+        if user is None:
+            return
         if user.protocol in self.users:
             if user.session is not None and user.session.key is not None:
                 session = self.sessions.get(user.session.key)
@@ -140,7 +155,8 @@ class Lobby:
             "event": "keep_alive"
         }
         encoded = json.dumps(message).encode("utf-8")
-        for user in self.users.values():
+        # delete_user() below mutates self.users, so iterate over a copy
+        for user in list(self.users.values()):
             try:
                 user.protocol.sendMessage(
                     encoded,

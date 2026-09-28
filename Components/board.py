@@ -2,8 +2,8 @@ from Components.component import Component
 
 class Board(Component):
     # boards are immovable images
-    def __init__(self, x, y, src, height, width):
-        super().__init__(id)
+    def __init__(self, component_id, x, y, src, width, height):
+        super().__init__(component_id)
         self.kind = 'board'
         self.x = x
         self.y = y

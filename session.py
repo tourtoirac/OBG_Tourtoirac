@@ -86,25 +86,24 @@ class Session:
 
     def add_user(self, user, role):
         """
-        Adds a user to the session. role determines where the user is added
-        Returns True if successful,
-        False if the game no longer has seats or if the user is already present
+        Adds a user to the session. role determines where the user is added.
+        Returns (True, None) if successful, (False, reason) otherwise.
         """
         if user in self.players or user in self.watchers:
-            return False
+            return False, "User is already in this session"
         match role:
             case 'player':
                 if len(self.players) >= self.max_players:
-                    return False
+                    return False, f"Session is full ({self.max_players} players)"
                 self.players.append(user)
-                return True
+                return True, None
             case 'watcher':
                 if len(self.watchers) >= self.max_watchers:
-                    return False
+                    return False, f"Session is full ({self.max_watchers} watchers)"
                 self.watchers.append(user)
-                return True
+                return True, None
             case _:
-                return False
+                return False, f"Invalid role '{role}'"
 
     def remove_user(self, user):
         """

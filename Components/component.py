@@ -16,10 +16,10 @@ class Component:
 
     def acquire(self, user: User):
         """
-        placeholder function
-        :return: Nothing
+        Marks the component as acquired by user.
+        Returns True on success, False if the component cannot be acquired.
         """
-        pass
+        return False
 
     def add(self, container_name: str, component, position: int = 0):
         """
@@ -65,10 +65,10 @@ class Component:
 
     def release(self, user: User):
         """
-        placeholder function
-        :return: Nothing
+        Releases the component held by user.
+        Returns True on success, False if user did not hold the component.
         """
-        pass
+        return False
 
     def roll(self):
         """

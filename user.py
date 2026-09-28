@@ -41,12 +41,20 @@ class User:
 
     def send(self, message):
         """
-        Sends a JSON message to the client
+        Sends a JSON message to the client.
+        Silently drops the message if the connection is already closed:
+        a user can disconnect while an asynchronous back-end call is pending.
         """
+        if self.protocol.isClosed():
+            return
+
         payload = json.dumps(message)
 
-        self.protocol.sendMessage(
-            payload.encode("utf-8"),
-            isBinary=False
-        )
+        try:
+            self.protocol.sendMessage(
+                payload.encode("utf-8"),
+                isBinary=False
+            )
+        except Exception:
+            return
 

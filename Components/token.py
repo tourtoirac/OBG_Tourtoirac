@@ -3,8 +3,8 @@ from user import User
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, x, y, front_image, back_image, width, height):
-        super().__init__(id)
+    def __init__(self, component_id, x, y, front_image, back_image, width, height):
+        super().__init__(component_id)
         self.kind = 'token'
         self.x = x
         self.y = y
@@ -21,9 +21,12 @@ class Token (Component):
         self.coordinates = (self.x, self.y)
 
     def acquire(self, user: User):
-        if self.acquired_by is None or self.acquired_by == user:
-            self.acquired_by = user
-        user.acquire(self.id)
+        if self.acquired_by is not None and self.acquired_by != user:
+            return False
+        self.acquired_by = user
+        if self.id not in user.acquired:
+            user.acquire(self.id)
+        return True
 
     def flip(self):
         if self.side == 'front' and self.image_src['back'] is not None:
@@ -40,9 +43,11 @@ class Token (Component):
             self.coordinates = (self.x, self.y)
 
     def release(self, user: User):
-        if self.acquired_by == user:
-            self.acquired_by = None
-            user.release(self.id)
+        if self.acquired_by != user:
+            return False
+        self.acquired_by = None
+        user.release(self.id)
+        return True
 
     def return_json(self, sat_list = None) -> dict:
         return {

@@ -1,0 +1,200 @@
+import json
+import logging
+import threading
+
+import pytest
+from twisted.internet import reactor
+from twisted.web import resource, server
+from twisted.web.server import NOT_DONE_YET
+
+from chabanas import Chabanas
+
+LOGGER = logging.getLogger("tests")
+
+SESSION = {
+    "name": "Waterloo",
+    "key": "KEY1",
+    "code": "CODE1",
+    "active": True,
+    "variant": "std",
+    "game_json": {
+        "game": {"max_players": 2, "max_watchers": 1},
+        "fixed": [],
+        "movable": [],
+    },
+}
+
+
+class FakeUser:
+    name = "alice"
+
+
+class Backend(resource.Resource):
+    isLeaf = True
+
+    def render_POST(self, request):
+        body = json.loads(request.content.read().decode())
+        path = request.path.decode()
+
+        if path == "/session/create":
+            if body.get("game_name") == "Inconnu":
+                request.setResponseCode(404)
+                return b'{"error":"unknown game"}'
+            return json.dumps({"session_code": SESSION["code"]}).encode()
+
+        if path in ("/session/get", "/session/join"):
+            if body.get("session_code") == "INCONNU":
+                request.setResponseCode(404)
+                return b'{"error":"not found"}'
+            return json.dumps({"session": SESSION}).encode()
+
+        if path == "/session/list":
+            if "Casse" in body.get("game_name_list", []):
+                request.setResponseCode(404)
+                return b'{"error":"nope"}'
+            return json.dumps({"sessions": {"CODE1": {"code": "CODE1"}}}).encode()
+
+        if path == "/game/list":
+            if "Casse" in body.get("game_name_list", []):
+                request.setResponseCode(404)
+                return b'{"error":"nope"}'
+            return json.dumps({"game_list": [{"name": "Waterloo"}]}).encode()
+
+        if path == "/not-json":
+            return b"<html>definitely not json</html>"
+
+        if path == "/no-session-field":
+            return json.dumps({"unexpected": True}).encode()
+
+        request.setResponseCode(404)
+        return b"{}"
+
+
+class SilentBackend(resource.Resource):
+    """Accepts the connection but never answers."""
+
+    isLeaf = True
+
+    def render_POST(self, request):
+        return NOT_DONE_YET
+
+
+@pytest.fixture
+def serve(on_reactor):
+    """Starts a Resource on a random port, yields the base URL, then stops it."""
+    servers = []
+
+    def _serve(site_resource):
+        listening = on_reactor(
+            reactor.listenTCP, 0, server.Site(site_resource), interface="127.0.0.1"
+        )
+        servers.append(listening)
+        return f"http://127.0.0.1:{listening.getHost().port}"
+
+    yield _serve
+
+    for listening in servers:
+        try:
+            on_reactor(listening.stopListening)
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def chabanas(serve):
+    instance = Chabanas(LOGGER, timeout=10.0)
+    instance.host_url = serve(Backend())
+    return instance
+
+
+class TestSuccessfulCalls:
+    def test_create_session_returns_the_session(self, chabanas, sync):
+        session = sync(chabanas.create_session("Waterloo", FakeUser(), "key"))
+
+        assert session["code"] == SESSION["code"]
+        assert "game_json" in session
+
+    def test_join_session_returns_the_unwrapped_session(self, chabanas, sync):
+        """
+        join_session used to return the whole response body while create_session
+        returned ['session'], so callers indexing ['name'] raised KeyError.
+        """
+        session = sync(chabanas.join_session("CODE1", FakeUser(), ""))
+
+        assert session["name"] == "Waterloo"
+        assert session["key"] == "KEY1"
+
+    def test_get_active_sessions(self, chabanas, sync):
+        assert sync(chabanas.get_active_sessions(["Waterloo"], [])) == {
+            "CODE1": {"code": "CODE1"}
+        }
+
+    def test_get_game_list(self, chabanas, sync):
+        assert sync(chabanas.get_game_list(["Waterloo"])) == [{"name": "Waterloo"}]
+
+    def test_get_session_info(self, chabanas, sync):
+        assert sync(chabanas.get_session_info("CODE1"))["key"] == "KEY1"
+
+
+class TestFailureHandling:
+    """Every failure must resolve to a falsy value, never raise."""
+
+    def test_create_session_http_error(self, chabanas, sync):
+        assert sync(chabanas.create_session("Inconnu", FakeUser(), "k")) is False
+
+    def test_join_session_http_error(self, chabanas, sync):
+        assert sync(chabanas.join_session("INCONNU", FakeUser(), "")) is False
+
+    def test_get_active_sessions_http_error(self, chabanas, sync):
+        assert sync(chabanas.get_active_sessions(["Casse"], [])) == {}
+
+    def test_get_game_list_http_error(self, chabanas, sync):
+        assert sync(chabanas.get_game_list(["Casse"])) is False
+
+    def test_body_that_is_not_json(self, chabanas, sync):
+        assert sync(chabanas._post_json("/not-json", {})) is False
+
+    def test_response_without_the_session_field(self, chabanas):
+        assert chabanas._extract_session({"unexpected": True}) is False
+        assert chabanas._extract_session({}) is False
+        assert chabanas._extract_session("not a dict") is False
+
+    def test_create_session_without_a_session_code(self, chabanas, sync):
+        assert sync(chabanas._post_json("/no-session-field", {})) == {"unexpected": True}
+
+    def test_connection_refused(self, sync):
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = "http://127.0.0.1:1"  # nothing listens there
+
+        assert sync(instance.get_game_list(["Waterloo"])) is False
+
+    def test_unresolvable_host(self, sync):
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = "http://not-a-real-host.invalid"
+
+        assert sync(instance.get_game_list(["Waterloo"])) is False
+
+
+class TestTimeout:
+    def test_timeout_resolves_instead_of_hanging(self, serve, sync):
+        """
+        requests.post had no timeout and ran on the reactor thread, so a slow or
+        dead back-end froze the entire service.
+        """
+        instance = Chabanas(LOGGER, timeout=1.0)
+        instance.host_url = serve(SilentBackend())
+
+        started = threading.Event()
+        finished = threading.Event()
+        captured = {}
+
+        def run():
+            instance.get_game_list(["Waterloo"]).addBoth(
+                lambda result: (captured.update(value=result), finished.set())
+            )
+            started.set()
+
+        reactor.callFromThread(run)
+        assert started.wait(5)
+        assert finished.wait(15), "le timeout n'a pas declenche"
+        assert captured["value"] is False

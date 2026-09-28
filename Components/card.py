@@ -4,10 +4,10 @@ from user import User
 import random
 
 class Card(Component):
-    def __init__(self, id, x, y, front_scr, back_src, width, height, orientation):
+    def __init__(self, component_id, x, y, front_scr, back_src, width, height, orientation):
         # cards are objects that can be moved, flipped, tapped
-        super().__init__(id)
-        self.id = id
+        super().__init__(component_id)
+        self.id = component_id
         self.kind = 'card'
         self.x = x
         self.y = y
@@ -39,11 +39,8 @@ class Card(Component):
         }
 
     def flip(self):
-        if self.side == 'front':
-            self.side = 'back'
-            self.src = self.image_src[self.side]
-        else:
-            self.side = 'front'
+        self.side = 'back' if self.side == 'front' else 'front'
+        self.src = self.image_src[self.side]
 
     def move(self, x, y, user: User):
         if self.acquired_by == user:

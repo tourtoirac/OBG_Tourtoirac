@@ -4,9 +4,9 @@ from user import User
 
 class Dice(Component):
     # dice can be moved, rolled
-    def __init__(self, id, x, y, src, width, height, src_list):
-        super().__init__(id)
-        self.id = id
+    def __init__(self, component_id, x, y, src, width, height, src_list):
+        super().__init__(component_id)
+        self.id = component_id
         self.kind = 'dice'
         self.x = x
         self.y = y

@@ -7,6 +7,7 @@ from autobahn.twisted.websocket import (
     listenWS,
 )
 from twisted.internet import reactor, task
+from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
 from handle_message import list_sessions, create_session, join_session, list_game, acquire, release, move
@@ -52,19 +53,34 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
             )
             return
         logger.debug(f"Received message : {message}")
-        self.handle_message(message)
+        try:
+            self.handle_message(message)
+        except Exception as error:
+            logger.error(f"[ON_MESSAGE] Unable to process message: {error}", exc_info=True)
+            self.send_error(
+                "internal_error",
+                "Unable to process the message"
+            )
 
     def handle_message(self, message):
+        if not isinstance(message, dict):
+            self.send_error(
+                "invalid_message",
+                "The message must be a JSON object"
+            )
+            return
+
         action = message.get("action")
+        result = None
         match action:
             case "list_game": # Gets the initialization values of the games
-                list_game(self, self.factory.lobby.logger, message)
+                result = list_game(self, self.factory.lobby.logger, message)
             case "list_sessions": # get list of available sessions in lobby
-                list_sessions(self, self.factory.lobby.logger, message)
+                result = list_sessions(self, self.factory.lobby.logger, message)
             case "create_session": # Creates a new session for a game
-                create_session(self, self.factory.lobby.logger, message)
+                result = create_session(self, self.factory.lobby.logger, message)
             case "join_session": # join an active session
-                join_session(self, self.factory.lobby.logger, message)
+                result = join_session(self, self.factory.lobby.logger, message)
             case "acquire": # associate a component to a user
                 acquire(self, self.factory.lobby.logger, message)
             case "release": # release a component from a user
@@ -76,8 +92,17 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                     "unknown_action",
                     f"Unknown action: {action}"
                 )
+                return
+
+        if isinstance(result, Deferred):
+            result.addErrback(self.log_handler_error, action)
+
+    def log_handler_error(self, failure, action):
+        logger.error(f"[HANDLER] Action '{action}' failed: {failure}")
 
     def send_error(self, code, message):
+        if self.isClosed():
+            return
         payload = {
             "event": "error",
             "error": {
@@ -93,7 +118,11 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
 
     def onClose(self, was_clean, code, reason):
         logger.info(f"Closed connection : clean={was_clean}, code={code}, reason={reason}")
+        # shutdown() clears the user registry before the close handshakes
+        # complete, so the user may already be gone at this point.
         user = self.factory.lobby.get_user(self)
+        if user is None:
+            return
         logger.info("[LOBBY] Deleting user")
         self.factory.lobby.delete_user(
             user

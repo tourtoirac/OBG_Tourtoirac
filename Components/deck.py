@@ -8,9 +8,9 @@ class Deck(Component):
     # decks contains cards
     # fixed or movable
     # fixed object
-    def __init__(self, id, x, y, src, width, height, image_src, fixed= False):
-        super().__init__(id)
-        self.id = id
+    def __init__(self, component_id, x, y, src, width, height, image_src, fixed= False):
+        super().__init__(component_id)
+        self.id = component_id
         self.kind = 'deck'
         self.x = x
         self.y = y
@@ -52,10 +52,14 @@ class Deck(Component):
         return returned_data
 
     def add(self, container_name: str, component, position: int = 0):
-        if container_name in self.containers:
-            if position < 0 or position > len(self.containers[container_name]):
-                position = -1
-            self.containers[container_name].insert(component, position)
+        stack = self.containers.get(container_name)
+        if stack is None:
+            return
+        if position < 0 or position > len(stack):
+            # list.insert() takes (index, value); index len(stack) appends
+            position = len(stack)
+        stack.insert(position, component)
+
 
     def move(self, x, y, user: User):
         if not self.fixed and user == self.acquired_by:
