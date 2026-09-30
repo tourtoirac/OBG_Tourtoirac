@@ -90,12 +90,27 @@ class Chabanas:
         return session
 
     @defer.inlineCallbacks
-    def create_session(self, game_name: str, user: User, key: str):
+    def create_session(
+            self,
+            game_name: str,
+            user: User,
+            key: str,
+            allows_watchers: bool,
+            session_min_players: int | None,
+            session_max_players: int | None,
+            access_key: str | None = None,
+            variant_name: str | None = None
+    ):
         # Try creating a session
         created = yield self._post_json("/session/create", {
             "game_name": game_name,
             "nickname": user.name,
-            "key": key
+            "key": key,
+            "allows_watchers": allows_watchers,
+            "session_min_players": session_min_players,
+            "session_max_players": session_max_players,
+            "access_key": access_key,
+            "variant_name": variant_name,
         })
         if not created:
             return False
@@ -107,6 +122,7 @@ class Chabanas:
 
         session_info = yield self._post_json("/session/get", {
             "session_code": session_code,
+            "sat_list": ["game_json"],
         })
         if not session_info:
             return False

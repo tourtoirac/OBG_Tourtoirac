@@ -45,9 +45,28 @@ class Lobby:
         return None
 
     @defer.inlineCallbacks
-    def create_session(self, game_name: str, user: User, key: str = ""):
+    def create_session(
+            self,
+            game_name: str,
+            user: User,
+            key: str = "",
+            allows_watchers: bool = True,
+            session_min_players: int | None = None,
+            session_max_players: int | None = None,
+            access_key: str | None = None,
+            variant_name: str | None = None
+    ):
         # checks if a session can be created with that user
-        session_info = yield self.chabanas.create_session(game_name, user, key)
+        session_info = yield self.chabanas.create_session(
+            game_name,
+            user,
+            key,
+            allows_watchers,
+            session_min_players,
+            session_max_players,
+            access_key,
+            variant_name
+        )
         if not session_info:
             return False, "Unable to create session"
 
@@ -84,8 +103,61 @@ class Lobby:
             return False, reason
 
         user.session = session
+        self._notify_lobby_users("join", session, user)
         return True, None
 
+    def resume_session(self, session_key: str, user: User, role: str = "player"):
+        """
+        Rebinds a freshly connected user to a session it already belonged to from
+        another page. The lobby and the game are two distinct documents, so the
+        game page opens its own WebSocket and gets a brand new User with no
+        session attached. It has to claim the session again by key, otherwise
+        acquire/release/move are all rejected with "no_session".
+        """
+        session = self.sessions.get(session_key)
+        if session is None:
+            return False, "session_not_found"
+
+        if user.session is session:
+            return True, None
+
+        # the same player may still be attached through a connection that has
+        # not been torn down yet: the newest connection wins.
+        previous = session.find_user(user.name)
+        if previous is not None and previous is not user:
+            self.logger.debug(
+                f"[RESUME] Replacing stale connection of {user.name} on session {session.code}"
+            )
+            session.remove_user(previous)
+
+        if role not in ("player", "watcher"):
+            return False, "invalid_role"
+
+        success, reason = session.add_user(user, role)
+        if not success:
+            return False, reason
+
+        user.session = session
+        self._notify_lobby_users("join", session, user)
+        return True, None
+
+
+    def _notify_lobby_users(self, event: str, session: Session, user: User):
+        """
+        Broadcasts a session membership change to every connected user so the
+        lobby can refresh the seats available on each session.
+        """
+        message = {
+            "event": "session_players_changed",
+            "code": session.code,
+            "game_name": session.name,
+            "action": event,
+            "nickname": user.name,
+            "players": len(session.players),
+            "max_players": session.max_players,
+        }
+        for lobby_user in list(self.users.values()):
+            lobby_user.send(message)
 
     def add_session(self, session: Session):
         if session.key not in self.sessions:
@@ -117,6 +189,7 @@ class Lobby:
                 session = self.sessions.get(user.session.key)
                 if session is not None:
                     session.remove_user(user)
+                    self._notify_lobby_users("leave", session, user)
                 else:
                     self.logger.warning(
                         f"[DELETE_USER] Session {user.session.key} not found in lobby for user {user.name}"

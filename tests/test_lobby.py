@@ -1,3 +1,4 @@
+import json
 import logging
 
 import pytest
@@ -317,6 +318,62 @@ class TestDeleteUser:
 
         lobby.delete_user(host)
         lobby.delete_user(host)
+
+
+class TestLobbyNotifications:
+    """A lobby client must learn about arrivals and departures without
+    polling, so it can hide a Join button once a session is full."""
+
+    def test_join_is_broadcast_to_every_connected_user(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        watcher = connect(lobby, "eve")
+
+        sync(lobby.join_session(session_info["code"], connect(lobby, "bob"), "", "player"))
+
+        assert json.loads(watcher.protocol.sent[-1])["event"] == "session_players_changed"
+        assert json.loads(host.protocol.sent[-1])["event"] == "session_players_changed"
+
+    def test_broadcast_reports_the_seat_count(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        eve = connect(lobby, "eve")
+
+        sync(lobby.join_session(session_info["code"], connect(lobby, "bob"), "", "player"))
+
+        payload = json.loads(eve.protocol.sent[-1])
+        assert payload["event"] == "session_players_changed"
+        assert payload["action"] == "join"
+        assert payload["nickname"] == "bob"
+        assert payload["code"] == session_info["code"]
+        assert payload["players"] == 2
+        assert payload["max_players"] == host.session.max_players
+
+    def test_leave_is_broadcast(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        guest = connect(lobby, "bob")
+        sync(lobby.join_session(session_info["code"], guest, "", "player"))
+        eve = connect(lobby, "eve")
+        eve.protocol.sent.clear()
+
+        lobby.delete_user(guest)
+
+        payload = json.loads(eve.protocol.sent[-1])
+        assert payload["action"] == "leave"
+        assert payload["nickname"] == "bob"
+        assert payload["players"] == 1
+
+    def test_no_broadcast_when_the_join_is_refused(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        eve = connect(lobby, "eve")
+        eve.protocol.sent.clear()
+
+        success, _ = sync(lobby.join_session(session_info["code"], host, "", "player"))
+
+        assert success is False
+        assert eve.protocol.sent == []
 
 
 class TestShutdown:

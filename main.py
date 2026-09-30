@@ -11,7 +11,7 @@ from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, list_game, acquire, release, move
+from handle_message import list_sessions, create_session, join_session, resume_session, list_game, acquire, release, move
 from lobby import Lobby
 from user import User
 
@@ -82,6 +82,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 result = create_session(self, self.factory.lobby.logger, message)
             case "join_session": # join an active session
                 result = join_session(self, self.factory.lobby.logger, message)
+            case "resume_session": # rebind a new connection to an already joined session
+                result = resume_session(self, self.factory.lobby.logger, message)
             case "acquire": # associate a component to a user
                 acquire(self, self.factory.lobby.logger, message)
             case "release": # release a component from a user

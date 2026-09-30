@@ -35,6 +35,11 @@ def create_session(self, logger, message):
     game_name = message["game_name"]
     user.name = message["nickname"]
     key = message["key"]
+    allows_watchers = message.get("allows_watchers", False)
+    session_min_players = message.get("session_min_players", None)
+    session_max_players = message.get("session_max_players", None)
+    access_key = message.get("access_key", None)
+    variant_name = message.get("variant_name", None)
 
     if game_name is None:
         self.send_error(
@@ -46,7 +51,12 @@ def create_session(self, logger, message):
     success, error = yield self.factory.lobby.create_session(
         game_name,
         user,
-        key
+        key,
+        allows_watchers,
+        session_min_players,
+        session_max_players,
+        access_key,
+        variant_name,
     )
 
     if not success:
@@ -59,7 +69,7 @@ def create_session(self, logger, message):
 
     user.send(
         {
-            "event": "session_created",
+            "event": "session_joined",
             "session": user.session.return_session_json()
         }
     )
@@ -97,8 +107,36 @@ def join_session(self, logger, message):
         logger.debug(f"{user.name} joined session {session_code} as {role}")
         user.send({
             "event": "session_joined",
-            "game": user.session.return_session_json()
+            "session": user.session.return_session_json()
         })
+
+
+@defer.inlineCallbacks
+def resume_session(self, logger, message):
+    logger.debug("Process resume_session message")
+    user = self.factory.lobby.get_user(self)
+    if "session_key" not in message:
+        self.send_error(
+            "missing_field",
+            "The resume_session message requires a session_key field"
+        )
+        return
+
+    session_key = message["session_key"]
+    user.name = message.get("nickname") or user.name
+    role = message.get("role", "player")
+
+    success, error = yield self.factory.lobby.resume_session(session_key, user, role)
+
+    if not success:
+        self.send_error(error, f"Unable to resume session {session_key}")
+        return
+
+    logger.debug(f"{user.name} resumed session {session_key}")
+    user.send({
+        "event": "session_joined",
+        "session": user.session.return_session_json()
+    })
 
 
 @defer.inlineCallbacks

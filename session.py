@@ -105,6 +105,19 @@ class Session:
             case _:
                 return False, f"Invalid role '{role}'"
 
+    def find_user(self, name):
+        """
+        Returns the player or watcher registered under that nickname, or None.
+        A same-named entry means a connection that was never properly closed.
+        """
+        for user in self.players:
+            if user.name == name:
+                return user
+        for user in self.watchers:
+            if user.name == name:
+                return user
+        return None
+
     def remove_user(self, user):
         """
         Removes a user from the session.
