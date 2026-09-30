@@ -123,6 +123,89 @@ class TestTokenAcquisition:
         assert (token.x, token.y) == (5, 6)
 
 
+class TestGreenBorder:
+    """
+    Le rectangle vert d'un jeton est pilote par le serveur : il disparait quand le
+    jeton bouge, revient quand le jeton est repose a son emplacement initial ou
+    quand "fixe la position" est utilise. Un jeton non repositionnable
+    (move_border=False) ne doit jamais l'afficher.
+    """
+
+    def test_a_token_starts_with_its_border(self, user):
+        assert Token("t1", 10, 20, "f.png", "b.png", 3, 4).border is True
+
+    def test_a_frozen_token_starts_without_border(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)
+        assert token.border is False
+
+    def test_moving_loses_the_border(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        token.move(200, 300, user)
+        assert token.border is False
+
+    def test_dropping_back_on_the_initial_spot_restores_the_border(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        assert token.place(10, 20, user) is True
+        assert token.border is True
+        assert (token.x, token.y) == (10, 20)
+
+    def test_dropping_elsewhere_keeps_the_border_off(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(200, 300, user) is True
+        assert token.border is False
+
+    def test_a_frozen_token_never_regains_its_border(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        token.place(10, 20, user)
+        assert token.border is False, "un jeton figé ne doit jamais avoir de rectangle"
+
+    def test_place_requires_the_holder(self, user):
+        other = User(name="bob", protocol=None)
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(10, 20, other) is False
+        assert (token.x, token.y) == (10, 20)
+        assert token.border is True, "un dépôt refusé ne doit rien changer"
+
+    def test_fix_position_restores_the_border(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        token.fix_position()
+        assert token.border is True
+        assert (token.x, token.y) == (200, 300), "fixe la position ne bouge pas le jeton"
+
+    def test_fix_position_does_not_enable_a_frozen_token(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        token.fix_position()
+        assert token.border is False
+
+    def test_return_json_exposes_the_border_state(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        data = token.return_json()
+        assert data["move_border"] is True
+        assert data["border"] is False
+        assert data["x"] == 200 and data["y"] == 300
+
+
 class TestNonAcquirableComponents:
     def test_base_component_refuses_acquisition(self, user):
         component = Component("x")

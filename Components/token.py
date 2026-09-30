@@ -3,7 +3,7 @@ from user import User
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True):
         super().__init__(component_id)
         self.kind = 'token'
         self.x = x
@@ -19,6 +19,16 @@ class Token (Component):
         self.orientation = 0
         self.acquired_by = None
         self.coordinates = (self.x, self.y)
+        # move_border : le jeton peut-il être repositionne pendant le tour
+        self.move_border = move_border
+        # border : rectangle vert affiché autour du jeton
+        self.border = move_border
+        # emplacement initial, celui du jeu : y revenir rend le rectangle vert
+        self.initial_x = x
+        self.initial_y = y
+
+    def at_initial_position(self, x, y) -> bool:
+        return x == self.initial_x and y == self.initial_y
 
     def acquire(self, user: User):
         if self.acquired_by is not None and self.acquired_by != user:
@@ -41,6 +51,29 @@ class Token (Component):
             self.x = x
             self.y = y
             self.coordinates = (self.x, self.y)
+            # un jeton deplace perd son rectangle jusqu'au prochain "fixe la position"
+            self.border = False
+
+    def place(self, x, y, user: User):
+        """
+        Position finale au lacher. Contrairement a move(), elle n'exige pas que
+        le jeton ait bouge pendant le glisser, et elle rend le rectangle vert au
+        jeton qui retrouve son emplacement initial.
+        :return: True si le jeton etait bien tenu par user
+        """
+        if self.acquired_by != user:
+            return False
+        self.x = x
+        self.y = y
+        self.coordinates = (self.x, self.y)
+        self.border = self.move_border and self.at_initial_position(x, y)
+        return True
+
+    def fix_position(self):
+        """
+        Remet le rectangle vert sur le jeton, s'il est repositionnable.
+        """
+        self.border = self.move_border
 
     def release(self, user: User):
         if self.acquired_by != user:
@@ -60,5 +93,7 @@ class Token (Component):
             "back_src": self.image_src["back"],
             "width": self.width,
             "height": self.height,
-            "orientation": self.orientation
+            "orientation": self.orientation,
+            "move_border": self.move_border,
+            "border": self.border
         }

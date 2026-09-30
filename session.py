@@ -60,7 +60,8 @@ class Session:
                         component['front_src'],
                         component['back_src'],
                         component['width'],
-                        component['height']
+                        component['height'],
+                        component.get('move_border', True)
                     )
                     self.components_lists['movable'].append(game_component)
                     self.components_dict[component['id']] = game_component
@@ -96,11 +97,13 @@ class Session:
                 if len(self.players) >= self.max_players:
                     return False, f"Session is full ({self.max_players} players)"
                 self.players.append(user)
+                user.role = 'player'
                 return True, None
             case 'watcher':
                 if len(self.watchers) >= self.max_watchers:
                     return False, f"Session is full ({self.max_watchers} watchers)"
                 self.watchers.append(user)
+                user.role = 'watcher'
                 return True, None
             case _:
                 return False, f"Invalid role '{role}'"
@@ -142,3 +145,16 @@ class Session:
 
     def get_component(self, component_id):
         return self.components_dict.get(component_id, False)
+
+    def fix_positions(self):
+        """
+        Remet le rectangle vert sur tous les jetons repositionnables.
+        Le nouvel etat est renvoyé pour que chaque ecran, joueurs comme
+        spectateurs, l'applique.
+        :return: list
+        """
+        fixed = []
+        for component in self.components_lists['movable']:
+            component.fix_position()
+            fixed.append(component.return_json())
+        return fixed

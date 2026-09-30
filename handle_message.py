@@ -70,7 +70,8 @@ def create_session(self, logger, message):
     user.send(
         {
             "event": "session_joined",
-            "session": user.session.return_session_json()
+            "session": user.session.return_session_json(),
+            "role": user.role
         }
     )
 
@@ -107,7 +108,8 @@ def join_session(self, logger, message):
         logger.debug(f"{user.name} joined session {session_code} as {role}")
         user.send({
             "event": "session_joined",
-            "session": user.session.return_session_json()
+            "session": user.session.return_session_json(),
+            "role": user.role
         })
 
 
@@ -135,7 +137,8 @@ def resume_session(self, logger, message):
     logger.debug(f"{user.name} resumed session {session_key}")
     user.send({
         "event": "session_joined",
-        "session": user.session.return_session_json()
+        "session": user.session.return_session_json(),
+        "role": user.role
     })
 
 
@@ -255,6 +258,10 @@ def release(self, logger, message):
         return
 
     component_id = message["component_id"]
+    # position de depot : le client l'envoie pour que le rectangle vert puisse
+    # revenir si le jeton retrouve son emplacement initial
+    if "x" in message and "y" in message:
+        component.place(message["x"], message["y"], user)
     released = component.release(user)
     release_message = {
                 "event": "release",
@@ -283,4 +290,36 @@ def move(self, logger, message):
                 "component_id" : component_id,
                 "coordinates" : component.return_json(),
             }
-    user.session.send_others(user, move_message)
+    # envoyé aussi a celui qui deplace : c'est lui aussi qui doit perdre
+    # le rectangle vert sur son propre ecran
+    user.session.send(move_message)
+
+
+def fix_positions(self, logger, message):
+    logger.debug("Process fix_positions message")
+    user = self.factory.lobby.get_user(self)
+
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            "The fix_positions action requires an active session"
+        )
+        return
+
+    if user.role != "player":
+        self.send_error(
+            "watcher_not_allowed",
+            "Only players can fix the positions of the counters"
+        )
+        return
+
+    components = user.session.fix_positions()
+    logger.debug(f"[FIX] {user.name} fixed {len(components)} counters")
+    user.session.send({
+        "event": "fix_positions",
+        "components": components,
+    })

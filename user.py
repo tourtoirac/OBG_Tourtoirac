@@ -8,6 +8,7 @@ class User:
         self.protocol = protocol
         self.session = None
         self.acquired = []
+        self.role = None
 
     def return_user_json(self) -> dict:
         """
@@ -18,7 +19,8 @@ class User:
             "id": self.id,
             "name": self.name,
             "session": self.session.key,
-            "acquired": self.acquired
+            "acquired": self.acquired,
+            "role": self.role
         }
         return user_json
 
