@@ -139,7 +139,13 @@ class Chabanas:
         })
         if not response:
             return False
-        return self._extract_session(response)
+        # /session/join returns the session object at the root of the response,
+        # while /session/get and /session/get_archive wrap it in {"session": ...}
+        session = response.get('session', response)
+        if not isinstance(session, dict) or 'key' not in session:
+            self.logger.error("[CHABANAS] Response has no session description")
+            return False
+        return session
 
     @defer.inlineCallbacks
     def get_active_sessions(self, game_name_list, sat_list):
@@ -161,6 +167,18 @@ class Chabanas:
         if not response:
             return False
         return self._extract_session(response)
+
+    @defer.inlineCallbacks
+    def update_session_state(self, session_key: str, game_json: dict):
+        """
+        Stores the current situation of a session, so it can be resumed later on.
+        :return: True when Chabanas acknowledged the update
+        """
+        response = yield self._post_json("/session/update", {
+            "key": str(session_key),
+            "game_json": game_json,
+        })
+        return bool(response)
 
     @defer.inlineCallbacks
     def get_game_list(self, game_name_list: list):

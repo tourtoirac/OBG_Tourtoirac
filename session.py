@@ -7,6 +7,10 @@ from Components.token import Token
 import uuid
 
 
+# champs de position arrondis dans l'état sauvegardé
+POSITION_FIELDS = ('x', 'y', 'initial_x', 'initial_y')
+
+
 class Session:
     def __init__(
             self,
@@ -53,6 +57,12 @@ class Session:
         for component in self.game_json['movable']:
             match component['kind']:
                 case 'token':
+                    # initial/border sont absents d'un game_json de jeu : ils ne
+                    # sont presents que si la session a ete reprise apres une
+                    # sauvegarde de la position courante.
+                    initial = None
+                    if 'initial_x' in component and 'initial_y' in component:
+                        initial = (component['initial_x'], component['initial_y'])
                     game_component = Token(
                         component['id'],
                         component['x'],
@@ -61,10 +71,48 @@ class Session:
                         component['back_src'],
                         component['width'],
                         component['height'],
-                        component.get('move_border', True)
+                        component.get('move_border', True),
+                        initial,
+                        component.get('border')
                     )
                     self.components_lists['movable'].append(game_component)
                     self.components_dict[component['id']] = game_component
+
+    def game_json_state(self) -> dict:
+        """
+        returns the game_json of the session with the current position of its
+        components, in the format load_session_components() reads back. Used to
+        store the situation when everybody leaves, so the session can be resumed
+        later on.
+        :return: dict
+        """
+        state = dict(self.game_json)
+        state['fixed'] = [
+            self._rounded_position(component.return_json())
+            for component in self.components_lists['fixed']
+        ]
+        state['movable'] = [
+            self._rounded_position(component.return_json())
+            for component in self.components_lists['movable']
+        ]
+        return state
+
+    @staticmethod
+    def _rounded_position(component_json: dict) -> dict:
+        """
+        Arrondi au pixel près des coordonnées d'un composant dans l'état
+        sauvegardé. Le client calcule des positions flottantes (il divise par le
+        zoom), et la base ne doit contenir que des entiers. L'arrondi n'est fait
+        qu'ici, pas au stockage en mémoire : le glisser reste ainsi lisse et le
+        jeton ne saute pas d'un pixel sous la souris.
+        :return: dict
+        """
+        saved = dict(component_json)
+        for key in POSITION_FIELDS:
+            value = saved.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                saved[key] = round(value)
+        return saved
 
     def return_session_json(self) -> dict:
         """
@@ -92,6 +140,8 @@ class Session:
         """
         if user in self.players or user in self.watchers:
             return False, "User is already in this session"
+        # somebody came back: the next emptying must be stored again
+        self.empty_since = None
         match role:
             case 'player':
                 if len(self.players) >= self.max_players:

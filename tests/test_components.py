@@ -8,7 +8,7 @@ from Components.card import Card
 from Components.component import Component
 from Components.deck import Deck
 from Components.dice import Dice
-from Components.token import Token
+from Components.token import MOVE_THRESHOLD, Token
 from user import User
 
 
@@ -126,9 +126,10 @@ class TestTokenAcquisition:
 class TestGreenBorder:
     """
     Le rectangle vert d'un jeton est pilote par le serveur : il disparait quand le
-    jeton bouge, revient quand le jeton est repose a son emplacement initial ou
+    jeton est depose loin de sa case de depart, revient quand il est depose a
+    moins de MOVE_THRESHOLD pixels d'elle ( auquel cas il est recadre dessus ), ou
     quand "fixe la position" est utilise. Un jeton non repositionnable
-    (move_border=False) ne doit jamais l'afficher.
+    (move_border=False) n'est jamais recadre et n'affiche jamais le rectangle.
     """
 
     def test_a_token_starts_with_its_border(self, user):
@@ -160,6 +161,47 @@ class TestGreenBorder:
 
         assert token.place(200, 300, user) is True
         assert token.border is False
+        assert (token.x, token.y) == (200, 300), "un dépôt loin n'est pas recadré"
+
+    def test_dropping_just_under_the_threshold_snaps_back(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(10 + 20, 20 + 10, user) is True
+        assert (token.x, token.y) == (10, 20), "29 px : le jeton doit être recadré"
+        assert token.border is True
+
+    def test_dropping_exactly_on_the_threshold_snaps_back(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(10 + MOVE_THRESHOLD, 20, user) is True
+        assert (token.x, token.y) == (10, 20), "la frontière est inclusive"
+        assert token.border is True
+
+    def test_dropping_just_over_the_threshold_stays_put(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(10 + MOVE_THRESHOLD + 1, 20, user) is True
+        assert (token.x, token.y) == (10 + MOVE_THRESHOLD + 1, 20), "31 px : pas de recadrage"
+        assert token.border is False
+
+    def test_the_threshold_is_measured_on_the_diagonal(self, user):
+        """La distance est euclidienne : 21 et 21 pixels font 29.7, pas 42."""
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+
+        assert token.place(10 + 21, 20 + 21, user) is True
+        assert (token.x, token.y) == (10, 20)
+
+    def test_a_frozen_token_is_never_snapped(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)
+        token.acquire(user)
+
+        assert token.place(11, 21, user) is True
+        assert (token.x, token.y) == (11, 21), "un jeton figé reste où on le pose"
+        assert token.border is False
 
     def test_a_frozen_token_never_regains_its_border(self, user):
         token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)
@@ -186,6 +228,27 @@ class TestGreenBorder:
         token.fix_position()
         assert token.border is True
         assert (token.x, token.y) == (200, 300), "fixe la position ne bouge pas le jeton"
+
+    def test_fix_position_makes_the_current_spot_the_new_start(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        token.fix_position()
+
+        assert (token.initial_x, token.initial_y) == (200, 300)
+        assert token.near_initial_position(200, 300) is True
+        assert token.near_initial_position(10, 20) is False
+
+    def test_after_fix_position_a_token_snaps_to_its_new_start(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4)
+        token.acquire(user)
+        token.move(200, 300, user)
+        token.fix_position()
+
+        assert token.place(215, 310, user) is True
+        assert (token.x, token.y) == (200, 300), "la nouvelle case de départ fait foi"
+        assert token.border is True
 
     def test_fix_position_does_not_enable_a_frozen_token(self, user):
         token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, move_border=False)

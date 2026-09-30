@@ -44,10 +44,12 @@ class FakeChabanas(Chabanas):
         self.info = info
         self.available = True
         self.calls = []
+        self.payloads = []
         self._agent = object()  # prevents building a real Agent
 
     def _post_json(self, path, payload):
         self.calls.append(path)
+        self.payloads.append((path, payload))
         if not self.available:
             return defer.succeed(False)
         if path == "/session/create":
@@ -318,6 +320,369 @@ class TestDeleteUser:
 
         lobby.delete_user(host)
         lobby.delete_user(host)
+
+
+class TestStoreStateWhenEmpty:
+    """When the last user leaves a session, its current situation must be stored
+    in the session game_json so the game can be resumed later on."""
+
+    def updates(self, lobby):
+        return [p for p, _ in lobby.chabanas.payloads if p == "/session/update"]
+
+    def test_state_is_stored_when_the_last_player_leaves(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        guest = connect(lobby, "bob")
+        sync(lobby.join_session("CODE1", guest, "", "player"))
+
+        lobby.delete_user(host)
+        assert self.updates(lobby) == [], "someone is still playing"
+
+        lobby.delete_user(guest)
+        assert self.updates(lobby) == ["/session/update"]
+
+    def test_a_watcher_keeps_the_session_alive(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        watcher = connect(lobby, "carol")
+        sync(lobby.join_session("CODE1", watcher, "", "watcher"))
+
+        lobby.delete_user(host)
+        assert self.updates(lobby) == [], "a spectator is still watching"
+
+        lobby.delete_user(watcher)
+        assert self.updates(lobby) == ["/session/update"]
+
+    def test_stored_state_holds_the_current_position(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        token = host.session.components_dict["t1"]
+        token.acquire(host)
+        token.place(400, 500, host)
+
+        lobby.delete_user(host)
+
+        _, payload = lobby.chabanas.payloads[-1]
+        stored = {c["id"]: c for c in payload["game_json"]["movable"]}
+        assert payload["key"] == host.session.key
+        assert stored["t1"]["x"] == 400 and stored["t1"]["y"] == 500
+        assert stored["t1"]["border"] is False
+
+    def test_state_is_not_stored_twice_while_nobody_comes_back(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        lobby.delete_user(host)
+        lobby.delete_user(host)
+
+        assert len(self.updates(lobby)) == 1
+
+    def test_state_is_stored_again_after_somebody_came_back(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.delete_user(host)
+
+        back = connect(lobby, "alice")
+        assert lobby.resume_session("KEY1", back, "player") == (True, None)
+        lobby.delete_user(back)
+
+        assert len(self.updates(lobby)) == 2
+
+    def test_the_session_stays_in_the_lobby(self, lobby, sync):
+        """Storing the state must not make the session disappear: players
+        coming back have to find it."""
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        lobby.delete_user(host)
+
+        assert host.session.key in lobby.sessions
+
+    def test_a_back_end_failure_does_not_break_disconnection(self, lobby, sync):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.available = False
+
+        lobby.delete_user(host)  # must not raise
+
+        assert host.protocol not in lobby.users
+
+
+class TestSessionStateReload:
+    """game_json_state() must produce a game_json that load_session_components()
+    reads back identically, otherwise a stored session cannot be resumed."""
+
+    def build(self, game_json):
+        return Session(
+            user=None, name="Waterloo", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=game_json,
+        )
+
+    def test_a_stored_session_reloads_with_the_current_position(self, session_info):
+        first = self.build(session_info["game_json"])
+        token = first.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        token.acquire(user)
+        token.place(400, 500, user)
+        assert (token.x, token.y) == (400, 500)
+
+        again = self.build(first.game_json_state())
+
+        reloaded = again.components_dict["t1"]
+        assert (reloaded.x, reloaded.y) == (400, 500)
+        assert reloaded.border is False
+
+    def test_the_initial_position_survives_a_reload(self, session_info):
+        """A moved token must keep the board spot as its initial position,
+        otherwise 'drop it back where it started' would drift on every reload."""
+        first = self.build(session_info["game_json"])
+        token = first.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        token.acquire(user)
+        assert token.place(400, 500, user) is True, "le jeton doit avoir bouge"
+        assert (token.x, token.y) == (400, 500)
+
+        again = self.build(first.game_json_state())
+        reloaded = again.components_dict["t1"]
+
+        assert (reloaded.initial_x, reloaded.initial_y) == (1, 2)
+        assert reloaded.near_initial_position(1, 2) is True
+        assert reloaded.near_initial_position(400, 500) is False
+
+    def test_a_token_dropped_back_before_reloading_keeps_its_border(self, session_info):
+        first = self.build(session_info["game_json"])
+        token = first.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        token.acquire(user)
+        assert token.place(400, 500, user) is True
+        assert token.border is False
+        assert token.place(1, 2, user) is True
+        assert token.border is True
+
+        again = self.build(first.game_json_state())
+
+        assert again.components_dict["t1"].border is True
+
+    def test_a_frozen_token_never_gets_a_border_from_a_reload(self, session_info):
+        info = session_info["game_json"]
+        info["movable"][0]["move_border"] = False
+        info["movable"][0]["border"] = True
+
+        reloaded = self.build(self.build(info).game_json_state())
+
+        assert reloaded.components_dict["t1"].border is False
+
+    def test_the_game_limits_are_preserved(self, session_info):
+        """Session.__init__ reads game_json['game'], so a stored state that lost
+        it would make the session impossible to rebuild."""
+        state = self.build(session_info["game_json"]).game_json_state()
+
+        assert state["game"] == {"max_players": 2, "max_watchers": 1}
+
+    def test_the_source_game_json_is_left_untouched(self, session_info):
+        session = self.build(session_info["game_json"])
+        token = session.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        token.acquire(user)
+        assert token.place(400, 500, user) is True
+
+        session.game_json_state()
+
+        assert session_info["game_json"]["movable"][0]["x"] == 1
+
+
+class TestFixPositionsMovesEveryStart:
+    """"fixe la position" makes the current spot the new start of every token."""
+
+    def build(self, game_json):
+        return Session(
+            user=None, name="Waterloo", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=game_json,
+        )
+
+    def two_tokens(self, session_info):
+        info = session_info["game_json"]
+        info["movable"].append({
+            "kind": "token", "id": "t2", "x": 50, "y": 60,
+            "front_src": "front.png", "back_src": "back.png",
+            "width": 32, "height": 32,
+        })
+        return self.build(info)
+
+    def test_every_token_gets_the_new_start(self, session_info):
+        session = self.two_tokens(session_info)
+        first = session.components_dict["t1"]
+        second = session.components_dict["t2"]
+        user = User(name="alice", protocol=None)
+        first.acquire(user)
+        second.acquire(user)
+        assert first.place(400, 500, user) is True
+        assert second.place(410, 510, user) is True
+
+        session.fix_positions()
+
+        assert (first.initial_x, first.initial_y) == (400, 500)
+        assert (second.initial_x, second.initial_y) == (410, 510)
+        assert first.border is True
+        assert second.border is True
+        assert "t2" in session.components_dict, "les deux jetons sont bien présents"
+
+    def test_the_stored_state_carries_the_new_start(self, session_info):
+        """The new start must be persisted, otherwise a reload would restore
+        the old case de depart."""
+        session = self.build(session_info["game_json"])
+        first = session.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        first.acquire(user)
+        first.place(400, 500, user)
+
+        session.fix_positions()
+
+        stored = {c["id"]: c for c in session.game_json_state()["movable"]}
+        assert (stored["t1"]["initial_x"], stored["t1"]["initial_y"]) == (400, 500)
+        assert stored["t1"]["border"] is True
+
+    def test_the_returned_components_describe_the_new_start(self, session_info):
+        session = self.build(session_info["game_json"])
+        first = session.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        first.acquire(user)
+        first.place(400, 500, user)
+
+        returned = session.fix_positions()
+
+        assert returned[0]["initial_x"] == 400
+        assert returned[0]["initial_y"] == 500
+        assert returned[0]["border"] is True
+
+
+class TestSavedPositionsAreIntegers:
+    """The client divides by the zoom, so positions are floats. Only the saved
+    state is rounded: the board keeps sub-pixel precision while dragging."""
+
+    def build(self, game_json):
+        return Session(
+            user=None, name="Waterloo", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=game_json,
+        )
+
+    def move_to(self, session, x, y):
+        # prendre puis poser, puis relâcher : le jeton doit être libre avant
+        # le déplacement suivant
+        token = session.components_dict["t1"]
+        user = User(name="alice", protocol=None)
+        assert token.acquire(user) is not False
+        assert token.place(x, y, user) is True
+        assert token.release(user) is True
+        return token
+
+    def movable(self, state):
+        return {c["id"]: c for c in state["movable"]}
+
+    def test_a_float_position_is_saved_as_an_integer(self, session_info):
+        session = self.build(session_info["game_json"])
+        self.move_to(session, 561.8153874060956, 586.5681792971355)
+
+        saved = self.movable(session.game_json_state())["t1"]
+
+        assert saved["x"] == 562
+        assert saved["y"] == 587
+        assert isinstance(saved["x"], int)
+        assert isinstance(saved["y"], int)
+
+    def test_the_rounding_is_to_the_nearest_pixel(self, session_info):
+        session = self.build(session_info["game_json"])
+        self.move_to(session, 561.81, 586.19)
+
+        saved = self.movable(session.game_json_state())["t1"]
+
+        assert saved["x"] == 562
+        assert saved["y"] == 586
+
+    def test_an_untouched_token_stays_an_integer(self, session_info):
+        session = self.build(session_info["game_json"])
+
+        saved = self.movable(session.game_json_state())["t1"]
+
+        assert (saved["x"], saved["y"]) == (1, 2)
+        assert isinstance(saved["initial_x"], int)
+
+    def test_the_start_position_is_rounded_too(self, session_info):
+        """fix_position copies a float position into initial_x/initial_y."""
+        session = self.build(session_info["game_json"])
+        self.move_to(session, 400.6, 500.2)
+        session.components_dict["t1"].fix_position()
+
+        saved = self.movable(session.game_json_state())["t1"]
+
+        assert (saved["initial_x"], saved["initial_y"]) == (401, 500)
+        assert isinstance(saved["initial_x"], int)
+        assert isinstance(saved["initial_y"], int)
+
+    def test_the_position_in_memory_stays_a_float(self, session_info):
+        """Rounding at save time only: the drag must not jump a pixel under the
+        cursor, so the live value keeps its sub-pixel precision."""
+        token = self.move_to(self.build(session_info["game_json"]), 561.8, 586.5)
+
+        assert token.x == 561.8
+        assert token.y == 586.5
+
+    def test_the_live_broadcast_is_not_rounded(self, session_info):
+        session = self.build(session_info["game_json"])
+        self.move_to(session, 561.8, 586.5)
+
+        live = session.components_dict["t1"].return_json()
+
+        assert live["x"] == 561.8
+        assert live["y"] == 586.5
+
+    def test_a_saved_state_can_be_reloaded_and_saved_again_unchanged(self, session_info):
+        session = self.build(session_info["game_json"])
+        self.move_to(session, 561.8, 586.5)
+
+        first = session.game_json_state()
+        second = self.build(first).game_json_state()
+
+        assert self.movable(first)["t1"]["x"] == self.movable(second)["t1"]["x"] == 562
+
+    def test_the_source_game_json_keeps_its_own_values(self, session_info):
+        """Rounding must not write back into the game's definitions."""
+        info = session_info["game_json"]
+        session = self.build(info)
+        self.move_to(session, 561.8, 586.5)
+
+        session.game_json_state()
+
+        assert info["movable"][0]["x"] == 1
+        assert info["movable"][0]["y"] == 2
+
+    def test_every_saved_position_is_an_integer(self, session_info):
+        info = session_info["game_json"]
+        info["movable"].append({
+            "kind": "token", "id": "t2", "x": 50.4, "y": 60.6,
+            "front_src": "front.png", "back_src": "back.png",
+            "width": 32, "height": 32,
+        })
+        session = self.build(info)
+        self.move_to(session, 561.8, 586.5)
+        session.components_dict["t2"].fix_position()
+
+        for component in session.game_json_state()["movable"]:
+            for key in ("x", "y", "initial_x", "initial_y"):
+                assert isinstance(component[key], int), f"{component['id']}.{key}"
+
+    def test_a_token_dropped_back_on_its_spot_stays_exact(self, session_info):
+        """Rounding must not shift the snap: a token put back on its case de
+        depart is stored on the very same integers."""
+        session = self.build(session_info["game_json"])
+        token = self.move_to(session, 400, 500)
+        session.fix_positions()
+        self.move_to(session, 401, 500)
+
+        saved = self.movable(session.game_json_state())["t1"]
+
+        assert (saved["x"], saved["y"], saved["initial_x"], saved["initial_y"]) \
+            == (400, 500, 400, 500)
 
 
 class TestLobbyNotifications:
