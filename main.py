@@ -11,7 +11,7 @@ from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, list_game, acquire, release, move, roll, rotate, fix_positions
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, list_game, acquire, release, move, roll, rotate, fix_positions
 from lobby import Lobby
 from user import User
 
@@ -53,7 +53,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "Invalid JSON message"
             )
             return
-        logger.debug(f"Received message : {message}")
+        if 'action' in message.keys() and message['action'] not in ['move']:
+            logger.debug(f"Received message : {message}")
         try:
             self.handle_message(message)
         except Exception as error:
@@ -84,6 +85,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 result = join_session(self, self.factory.lobby.logger, message)
             case "resume_session": # rebind a new connection to an already joined session
                 result = resume_session(self, self.factory.lobby.logger, message)
+            case "close_session": # the owner archives the game and everyone else watches
+                result = close_session(self, self.factory.lobby.logger, message)
             case "acquire": # associate a component to a user
                 acquire(self, self.factory.lobby.logger, message)
             case "release": # release a component from a user

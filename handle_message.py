@@ -80,7 +80,10 @@ def create_session(self, logger, message):
         {
             "event": "session_joined",
             "session": user.session.return_session_json(),
-            "role": user.role
+            "role": user.role,
+            # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
+            # peut le savoir que si le serveur le lui dit
+            "owner": user.session.is_owner(user)
         }
     )
 
@@ -93,7 +96,53 @@ JOIN_REFUSALS = {
     "session_unavailable": "This game is full or locked",
     "missing_field": "Missing information to join the game",
     "invalid_role": "Invalid role",
+    "session_closed": "This game is closed",
 }
+
+
+# ce que repond le serveur quand la clôture est refusee
+CLOSE_REFUSALS = {
+    "no_session": "You are not in a game",
+    "not_session_owner": "Only the owner of the game can close it",
+    "session_closed": "This game is already closed",
+    "session_state_not_stored": "Unable to store the game before closing it",
+    "session_not_archived": "Unable to archive the game",
+}
+
+
+@defer.inlineCallbacks
+def close_session(self, logger, message):
+    """
+    Closes the game for good, on behalf of its owner: the situation is stored,
+    the session is archived in the back-end, and everybody still connected
+    becomes a spectator of a game that will not be resumed.
+
+    The owner is checked here and not only in the interface: hiding a link is
+    not a permission, and anyone can craft the message that hides it.
+    """
+    logger.debug("Process close_session message")
+    user = self.factory.lobby.get_user(self)
+    if user is None or user.session is None:
+        self.send_error("no_session", CLOSE_REFUSALS["no_session"])
+        return
+
+    session = self.factory.lobby.sessions.get(user.session.key)
+    if session is None:
+        self.send_error("no_session", CLOSE_REFUSALS["no_session"])
+        return
+
+    if not session.is_owner(user):
+        self.send_error("not_session_owner", CLOSE_REFUSALS["not_session_owner"])
+        return
+
+    success, error = yield self.factory.lobby.close_session(session)
+
+    if not success:
+        self.send_error(error, CLOSE_REFUSALS.get(error, "Unable to close the game"))
+        return
+
+    # la session a deja diffuse session_closed a tout le monde, l'owner compris
+    logger.debug(f"{user.name} closed session {session.code}")
 
 
 @defer.inlineCallbacks
@@ -137,7 +186,10 @@ def join_session(self, logger, message):
         user.send({
             "event": "session_joined",
             "session": user.session.return_session_json(),
-            "role": user.role
+            "role": user.role,
+            # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
+            # peut le savoir que si le serveur le lui dit
+            "owner": user.session.is_owner(user)
         })
 
 
@@ -166,7 +218,8 @@ def resume_session(self, logger, message):
     user.send({
         "event": "session_joined",
         "session": user.session.return_session_json(),
-        "role": user.role
+        "role": user.role,
+        "owner": user.session.is_owner(user)
     })
 
 

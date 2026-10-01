@@ -69,6 +69,17 @@ class Backend(resource.Resource):
                 return b'{"error":"nope"}'
             return json.dumps({"game_list": [{"name": "Waterloo"}]}).encode()
 
+        if path == "/session/update":
+            return json.dumps({"status": "success"}).encode()
+
+        if path == "/session/archive":
+            # the real view answers with plain text, not JSON, and says so
+            # through its status code
+            if body.get("key") == "INCONNU":
+                request.setResponseCode(404)
+                return b"{}"
+            return b"Success"
+
         if path == "/not-json":
             return b"<html>definitely not json</html>"
 
@@ -172,6 +183,16 @@ class TestSuccessfulCalls:
     def test_get_session_info(self, chabanas, sync):
         assert sync(chabanas.get_session_info("CODE1"))["key"] == "KEY1"
 
+    def test_update_session_state(self, chabanas, sync):
+        assert sync(chabanas.update_session_state("KEY1", {"movable": []})) is True
+
+    def test_archive_session_reads_a_plain_text_answer(self, chabanas, sync):
+        """
+        /session/archive answers with the text "Success", which the JSON reader
+        cannot decode. Only the status code tells the session was archived.
+        """
+        assert sync(chabanas.archive_session("KEY1")) is True
+
 
 class TestFailureHandling:
     """Every failure must resolve to a falsy value, never raise."""
@@ -188,6 +209,9 @@ class TestFailureHandling:
 
     def test_get_active_sessions_http_error(self, chabanas, sync):
         assert sync(chabanas.get_active_sessions(["Casse"], [])) == {}
+
+    def test_archive_session_http_error(self, chabanas, sync):
+        assert sync(chabanas.archive_session("INCONNU")) is False
 
     def test_get_game_list_http_error(self, chabanas, sync):
         assert sync(chabanas.get_game_list(["Casse"])) is False

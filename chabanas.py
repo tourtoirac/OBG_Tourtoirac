@@ -217,6 +217,22 @@ class Chabanas:
         return bool(response)
 
     @defer.inlineCallbacks
+    def archive_session(self, session_key: str):
+        """
+        Archives a session for good: it leaves the lobby and nobody can join it
+        anymore. The players stay attached to it in the back-end, so the
+        archived game still lists who was sitting at the table.
+
+        with_status is required: /session/archive answers with the plain text
+        "Success", which the JSON body reader cannot decode.
+        :return: True when Chabanas acknowledged the archive
+        """
+        status, _ = yield self._post_json("/session/archive", {
+            "key": str(session_key),
+        }, with_status=True)
+        return status == 200
+
+    @defer.inlineCallbacks
     def get_game_list(self, game_name_list: list):
         response = yield self._post_json("/game/list", {
             "game_name_list": game_name_list,

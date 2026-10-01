@@ -22,6 +22,7 @@ class Session:
             active: bool,
             variant: str,
             game_json: dict,
+            owner_nickname: str | None = None,
             ):
         self.key = key
         self.name = name
@@ -43,6 +44,13 @@ class Session:
         self.watchers = []
         self.game_json = game_json
         self.empty_since = None
+        # Chabanas est seul juge de l'ownership : le pseudo du createur arrive
+        # dans la description de session. Aucun client ne peut s'octroyer ce
+        # droit, il ne fait que le lire.
+        self.owner_nickname = owner_nickname
+        # une session close reste en memoire le temps que ses connexions se
+        # ferment, mais elle n'accepte plus personne et ne se rejoins plus
+        self.closed = False
         self.load_session_components()
 
     def load_session_components(self):
@@ -169,6 +177,7 @@ class Session:
         session_json = {
             "key": self.key,
             "code": self.code,
+            "owner": self.owner_nickname,
             "max_players": self.max_players,
             "max_watchers": self.max_watchers,
             "players": f"{len(self.players)}/{self.max_players}",
@@ -180,6 +189,36 @@ class Session:
             }
         }
         return session_json
+
+    def is_owner(self, user: User) -> bool:
+        """
+        Tells whether that user created the session, and may therefore close it.
+        The nickname is the only thing compared: a connection is not the owner,
+        the seat is.
+        """
+        return self.owner_nickname is not None and user.name == self.owner_nickname
+
+    def close(self) -> list:
+        """
+        Closes the game: the session stops being joinable and everyone still
+        connected becomes a spectator, so nobody keeps a hand on a token of a
+        game that no longer exists.
+
+        The watchers quota is deliberately ignored here. It exists to keep the
+        lobby tidy on a running game; on a closed one it would leave somebody
+        without any role at all, and the conversion cannot fail halfway.
+
+        :return: the users demoted from player to watcher
+        """
+        self.closed = True
+        self.active = False
+        demoted = []
+        for user in list(self.players):
+            self.players.remove(user)
+            user.role = 'watcher'
+            self.watchers.append(user)
+            demoted.append(user)
+        return demoted
 
     def add_user(self, user, role):
         """

@@ -27,6 +27,19 @@ class Lobby:
             "active": active,
         }
 
+    @staticmethod
+    def _owner_of(session_info: dict) -> str | None:
+        """
+        Lit le proprietaire dans la liste des joueurs que Chabanas vient de
+        renvoyer. C'est la seule source de verite de l'ownership : c'est elle
+        qui decide qui a le droit de clore une partie.
+        :return: le pseudo du createur, ou None si la liste n'en dit rien
+        """
+        for player in session_info.get("players") or []:
+            if player.get("owner"):
+                return player.get("nickname")
+        return None
+
     def _build_session(self, session_info):
         return Session(
             user=None,
@@ -35,8 +48,19 @@ class Lobby:
             code=session_info["code"],
             active=session_info["active"],
             variant=session_info["variant"],
-            game_json=session_info['game_json']
+            game_json=session_info['game_json'],
+            owner_nickname=self._owner_of(session_info)
         )
+
+    def _refresh_owner(self, session: Session, session_info: dict) -> Session:
+        """
+        Retient le proprietaire d'une session construite avant qu'on puisse le
+        lire. Une session n'est construite que par le premier client qui la
+        demande : le createur peut donc apparaitre apres la session elle-meme.
+        """
+        if session.owner_nickname is None:
+            session.owner_nickname = self._owner_of(session_info)
+        return session
 
     def _find_session_by_code(self, session_code):
         for session in self.sessions.values():
@@ -102,6 +126,9 @@ class Lobby:
             self.add_session(session)
         else:
             self.logger.debug(f"Session with code {session_code} found in lobby")
+            # la session vit deja ici : son proprietaire peut ne pas etre connu
+            # encore, la description fraiche de Chabanas permet de le retenir
+            self._refresh_owner(session, session_info)
             # la session vit deja ici : on garde son etat (jetons deplaces) et on
             # ignore le game_json renvoie par Chabanas, qui est celui du stockage
 
@@ -124,6 +151,11 @@ class Lobby:
         session = self.sessions.get(session_key)
         if session is None:
             return False, "session_not_found"
+
+        # une partie closee n'est plus rejouable : Chabanas a vide son code,
+        # seule une session encore en memoire pourrait la retrouver
+        if session.closed:
+            return False, "session_closed"
 
         if user.session is session:
             return True, None
@@ -149,17 +181,20 @@ class Lobby:
         return True, None
 
 
-    def _notify_lobby_users(self, event: str, session: Session, user: User):
+    def _notify_lobby_users(self, event: str, session: Session, user: User = None):
         """
         Broadcasts a session membership change to every connected user so the
         lobby can refresh the seats available on each session.
+
+        A closure has no acting user: the nickname it then reports is the one of
+        the session owner, the only one entitled to that action.
         """
         message = {
             "event": "session_players_changed",
             "code": session.code,
             "game_name": session.name,
             "action": event,
-            "nickname": user.name,
+            "nickname": user.name if user is not None else session.owner_nickname,
             "players": len(session.players),
             "max_players": session.max_players,
         }
@@ -182,6 +217,45 @@ class Lobby:
         else:
             return False, "Unable to retrieve game information"
 
+    @defer.inlineCallbacks
+    def close_session(self, session: Session):
+        """
+        Archive une session pour de bon, au nom de son proprietaire.
+
+        Chabanas est appele deux fois, dans cet ordre : d'abord pour stocker ou
+        en sont les pions, afin que la partie archivee garde sa derniere
+        situation et non la disposition initiale de sa creation, puis pour
+        archiver la session elle-meme. Un des deux appels peut echouer, et la
+        partie reste alors ouverte : annoncer une cloture qui n'a pas ete
+        enregistree ne ferait que perdre la session.
+
+        :return: (True, None) on success, (False, reason) otherwise
+        """
+        if session.closed:
+            return False, "session_closed"
+
+        stored = yield self.chabanas.update_session_state(
+            session.key,
+            session.game_json_state()
+        )
+        if not stored:
+            return False, "session_state_not_stored"
+
+        archived = yield self.chabanas.archive_session(session.key)
+        if not archived:
+            return False, "session_not_archived"
+
+        demoted = session.close()
+        self.logger.info(
+            f"[SESSION] {session.key} closed by its owner, "
+            f"{len(demoted)} player(s) turned into watcher(s)"
+        )
+        # toute la session l'apprend : l'owner qui reclique, et les autres qui
+        # passent du coup du role de joueur a celui de spectateur
+        session.send({"event": "session_closed"})
+        self._notify_lobby_users("closed", session)
+        return True, None
+
     def add_user(self, user: User):
         self.users[user.protocol] = user
 
@@ -194,6 +268,10 @@ class Lobby:
         it, so it can be resumed later on. The session is kept in the lobby:
         players coming back find the state they left.
         """
+        # une partie closee a deja ete stockee puis archivee : la reecrire quand
+        # son dernier spectateur part ne servirait a rien
+        if session.closed:
+            return
         if session.players or session.watchers:
             return
         if session.empty_since is not None:
