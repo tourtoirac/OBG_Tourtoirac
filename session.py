@@ -2,6 +2,7 @@ from unittest import loader
 
 from user import User
 from Components.board import Board
+from Components.dice import Dice
 from Components.token import Token
 
 import uuid
@@ -28,6 +29,10 @@ class Session:
         self.components_lists = {
             "fixed": [],
             "movable": [],
+            # les dés sont leur propre liste : ils ne sont ni plateaux fixes ni
+            # pions déplaçables, et surtout ils n'ont pas de position initiale à
+            # remettre, ce que "Fixe la position" ferait sur un jeton
+            "dice": [],
         }
         self.components_dict = {}
         self.max_players = game_json["game"]["max_players"]
@@ -41,42 +46,67 @@ class Session:
         self.load_session_components()
 
     def load_session_components(self):
-        for component in self.game_json['fixed']:
-            match component['kind']:
-                case 'board':
-                    game_component = Board(
-                        component['id'],
-                        component['x'],
-                        component['y'],
-                        component['src'],
-                        component['width'],
-                        component['height']
-                    )
-                    self.components_lists["fixed"].append(game_component)
-                    self.components_dict[component['id']] = game_component
-        for component in self.game_json['movable']:
-            match component['kind']:
-                case 'token':
-                    # initial/border sont absents d'un game_json de jeu : ils ne
-                    # sont presents que si la session a ete reprise apres une
-                    # sauvegarde de la position courante.
-                    initial = None
-                    if 'initial_x' in component and 'initial_y' in component:
-                        initial = (component['initial_x'], component['initial_y'])
-                    game_component = Token(
-                        component['id'],
-                        component['x'],
-                        component['y'],
-                        component['front_src'],
-                        component['back_src'],
-                        component['width'],
-                        component['height'],
-                        component.get('move_border', True),
-                        initial,
-                        component.get('border')
-                    )
-                    self.components_lists['movable'].append(game_component)
-                    self.components_dict[component['id']] = game_component
+        for list_name in ("fixed", "movable"):
+            for component in self.game_json.get(list_name, []):
+                match component['kind']:
+                    case 'board':
+                        game_component = Board(
+                            component['id'],
+                            component['x'],
+                            component['y'],
+                            component['src'],
+                            component['width'],
+                            component['height']
+                        )
+                        self.components_lists["fixed"].append(game_component)
+                        self.components_dict[component['id']] = game_component
+                    case 'dice':
+                        self.add_dice(component, list_name)
+                    case 'token' if list_name == 'movable':
+                        # initial/border sont absents d'un game_json de jeu : ils ne
+                        # sont presents que si la session a ete reprise apres une
+                        # sauvegarde de la position courante.
+                        initial = None
+                        if 'initial_x' in component and 'initial_y' in component:
+                            initial = (component['initial_x'], component['initial_y'])
+                        game_component = Token(
+                            component['id'],
+                            component['x'],
+                            component['y'],
+                            component['front_src'],
+                            component['back_src'],
+                            component['width'],
+                            component['height'],
+                            component.get('move_border', True),
+                            initial,
+                            component.get('border')
+                        )
+                        self.components_lists['movable'].append(game_component)
+                        self.components_dict[component['id']] = game_component
+
+    def add_dice(self, component: dict, list_name: str):
+        """
+        Builds a dice from its game_json description and files it under "dice".
+        Accepts it in the "fixed", the "movable" or a dedicated "dice" list: a
+        dice is neither a board nor a token, so where it sits in the game_json is
+        a detail of the game, not of the session. The list it came from is kept
+        so that saving the situation puts it back where it was.
+        :param component: the dice description from the game_json
+        :param list_name: "fixed", "movable" or "dice", where it was declared
+        """
+        game_component = Dice(
+            component['id'],
+            component['x'],
+            component['y'],
+            component.get('src'),
+            component['width'],
+            component['height'],
+            component['src_list'],
+            list_name
+        )
+        self.components_lists['dice'].append(game_component)
+        self.components_dict[component['id']] = game_component
+        return game_component
 
     def game_json_state(self) -> dict:
         """
@@ -87,14 +117,22 @@ class Session:
         :return: dict
         """
         state = dict(self.game_json)
+        dice_by_origin = {'fixed': [], 'movable': [], 'dice': []}
+        for component in self.components_lists['dice']:
+            dice_by_origin[component.origin_list].append(
+                self._rounded_position(component.return_json())
+            )
         state['fixed'] = [
             self._rounded_position(component.return_json())
             for component in self.components_lists['fixed']
-        ]
+        ] + dice_by_origin['fixed']
         state['movable'] = [
             self._rounded_position(component.return_json())
             for component in self.components_lists['movable']
-        ]
+        ] + dice_by_origin['movable']
+        # une liste "dice" dédiée n'est écrite que si le jeu en a une
+        if dice_by_origin['dice'] or 'dice' in state:
+            state['dice'] = dice_by_origin['dice']
         return state
 
     @staticmethod
@@ -128,7 +166,8 @@ class Session:
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
             "components": {
                 "fixed" : [component.return_json() for component in self.components_lists["fixed"]],
-                "movable": [component.return_json() for component in self.components_lists['movable']]
+                "movable": [component.return_json() for component in self.components_lists['movable']],
+                "dice": [component.return_json() for component in self.components_lists['dice']]
             }
         }
         return session_json

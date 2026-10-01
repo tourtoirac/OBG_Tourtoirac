@@ -323,6 +323,44 @@ def move(self, logger, message):
     user.session.send(move_message)
 
 
+def roll(self, logger, message):
+    logger.debug("Process roll message")
+    user, component, ready = resolve_component_action(
+        self, message, "roll", ["component_id"]
+    )
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    # seuls les dés se lancent d'un clic : un jeton ou un plateau renvoyés ici
+    # ne doivent pas être lancés par erreur
+    if not component.clickable():
+        self.send_error(
+            "component_not_clickable",
+            f"Component {component_id} cannot be rolled"
+        )
+        return
+
+    # le délai est ici, sur le serveur : un client ne peut pas s'en affranchir
+    # en ajustant son horloge, et tous les écrans voient la même chose
+    if not component.is_rolling_allowed():
+        self.send_error(
+            "dice_cooling_down",
+            f"Component {component_id} is still cooling down"
+        )
+        return
+
+    src = component.roll()
+    # la face est diffusée à tous, joueurs comme spectateurs : chaque écran
+    # affiche le même résultat, et rejoue le délai localement
+    user.session.send({
+        "event": "roll",
+        "component_id": component_id,
+        "src": src,
+        "cooldown_seconds": component.roll_cooldown(),
+    })
+
+
 def fix_positions(self, logger, message):
     logger.debug("Process fix_positions message")
     user = self.factory.lobby.get_user(self)
