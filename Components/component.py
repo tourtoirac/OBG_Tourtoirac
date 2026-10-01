@@ -100,6 +100,21 @@ class Component:
         """
         return 0.0
 
+    def rotatable(self) -> bool:
+        """
+        Whether this component can be turned. Only a token that its game_json
+        marks as orientable can; boards and dice have nothing to turn.
+        :return: True when the component may be rotated
+        """
+        return False
+
+    def rotate(self, delta: int) -> int:
+        """
+        Turns the component by delta degrees, clockwise when positive.
+        :return: the new orientation, in degrees
+        """
+        return 0
+
     def shuffle(self, container_name: str):
         """
         placeholder function

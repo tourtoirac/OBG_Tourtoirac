@@ -65,9 +65,9 @@ class Session:
                     case 'dice':
                         self.add_dice(component, list_name)
                     case 'token' if list_name == 'movable':
-                        # initial/border sont absents d'un game_json de jeu : ils ne
-                        # sont presents que si la session a ete reprise apres une
-                        # sauvegarde de la position courante.
+                        # initial/border/orientation sont absents d'un game_json de
+                        # jeu : ils ne sont presents que si la session a ete reprise
+                        # apres une sauvegarde de la position courante.
                         initial = None
                         if 'initial_x' in component and 'initial_y' in component:
                             initial = (component['initial_x'], component['initial_y'])
@@ -81,7 +81,11 @@ class Session:
                             component['height'],
                             component.get('move_border', True),
                             initial,
-                            component.get('border')
+                            component.get('border'),
+                            # orientable : le jeu autorise-t-il les zones de rotation
+                            component.get('orientable', False),
+                            # orientation : l'angle atteint avant la sauvegarde
+                            component.get('orientation', 0)
                         )
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component

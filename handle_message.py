@@ -1,5 +1,14 @@
 from twisted.internet import defer
 
+from Components.token import ROTATION_STEP
+
+# Un cran de rotation vaut ROTATION_STEP degres. Le client clique une zone et
+# dit de quel bord il tourne ; il ne peut pas choisir l'angle.
+ROTATE_DIRECTIONS = {
+    "right": ROTATION_STEP,
+    "left": -ROTATION_STEP,
+}
+
 @defer.inlineCallbacks
 def list_sessions(self, logger, message):
     logger.debug("Process list_sessions message")
@@ -358,6 +367,58 @@ def roll(self, logger, message):
         "component_id": component_id,
         "src": src,
         "cooldown_seconds": component.roll_cooldown(),
+    })
+
+
+def rotate(self, logger, message):
+    """
+    Fait pivoter un jeton d'un cran. Le client n'envoie que le sens du clic :
+    c'est le serveur qui compte de combien ca tourne, et qui normalise l'angle.
+    """
+    logger.debug("Process rotate message")
+    user, component, ready = resolve_component_action(
+        self, message, "rotate", ["component_id", "direction"]
+    )
+    if not ready:
+        return
+
+    direction = message["direction"]
+    # isinstance avant la comparaison : "in" sur un dict hache la cle, et une
+    # liste ou un objet venu du client ferait tomber le handler
+    if not isinstance(direction, str) or direction not in ROTATE_DIRECTIONS:
+        self.send_error(
+            "invalid_direction",
+            f"Rotation direction must be one of {sorted(ROTATE_DIRECTIONS)}"
+        )
+        return
+
+    component_id = message["component_id"]
+    # seuls les jetons que le jeu declare orientables se tournent : un plateau
+    # ou un jeton non oriente renvoyes ici ne doivent pas pivoter par erreur
+    if not component.rotatable():
+        self.send_error(
+            "component_not_rotatable",
+            f"Component {component_id} cannot be rotated"
+        )
+        return
+
+    # un pion en main tourne sous la souris d'un autre joueur : on attend qu'il
+    # soit pose. C'est aussi ce qu'attend le client, qui n'affiche les zones
+    # que main vide.
+    if getattr(component, "acquired_by", None) is not None:
+        self.send_error(
+            "component_held",
+            f"Component {component_id} is held by a player"
+        )
+        return
+
+    orientation = component.rotate(ROTATE_DIRECTIONS[direction])
+    # l'angle est diffuse a tous, joueurs comme spectateurs : chaque ecran
+    # affiche le meme pion, dans le meme sens
+    user.session.send({
+        "event": "rotate",
+        "component_id": component_id,
+        "orientation": orientation,
     })
 
 

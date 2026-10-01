@@ -6,9 +6,28 @@ from user import User
 # règle de jeu, pas un réglage.
 MOVE_THRESHOLD = 30
 
+# degres : un cran de rotation du pion. Le client ne propose que le sens du
+# clic, c'est le serveur qui compte de combien ca tourne. 45 degres donne les
+# 8 positions d'un pion pose droit, cliquables sans viser juste.
+ROTATION_STEP = 45
+
+
+def normalize_orientation(orientation) -> int:
+    """
+    Ramene un angle dans [0, 360). Huit crans de 45 degres font le tour
+    complet : on veut lire 0 plutot que 360 sur tous les ecrans.
+    :return: l'angle normalise, en degres entier
+    """
+    try:
+        value = int(orientation)
+    except (TypeError, ValueError):
+        return 0
+    return value % 360
+
+
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0):
         super().__init__(component_id)
         self.kind = 'token'
         self.x = x
@@ -21,19 +40,43 @@ class Token (Component):
         self.src = self.image_src[self.side]
         self.width = width
         self.height = height
-        self.orientation = 0
+        self.orientation = normalize_orientation(orientation)
         self.acquired_by = None
         self.coordinates = (self.x, self.y)
         # move_border : le jeton peut-il être repositionne pendant le tour
         self.move_border = move_border
+        # orientable : le jeu autorise-t-il a faire pivoter le pion ? Le
+        # client n'affiche les zones de rotation que si c'est vrai. Seule la
+        # valeur booleenne True compte : une chaine "false" ne vaut pas plus
+        # qu'un absent.
+        self.orientable = orientable is True
         # emplacement initial, celui du jeu : y revenir rend le rectangle vert.
-        # initial/border sont fournis quand la session est reprise après une sauvegarde.
+        # initial/border sont fournis quand la session est reprise apres une sauvegarde.
         if initial is None:
             initial = (x, y)
         self.initial_x = initial[0]
         self.initial_y = initial[1]
         # un jeton non repositionnable n'affiche jamais le rectangle vert
         self.border = move_border if border is None else (border and move_border)
+
+    def rotatable(self) -> bool:
+        return self.orientable
+
+    def rotate(self, delta: int) -> int:
+        """
+        Fait pivoter le pion de delta degres, vers la droite si positif.
+        L'angle est ramene dans [0, 360) pour ne pas drift-er indefiniment.
+        """
+        self.orientation = normalize_orientation(self.orientation + delta)
+        return self.orientation
+
+    def tap(self, orientation: int):
+        """
+        Pose directement l'orientation du pion. Utilise par rotate(), mais aussi
+        utile a un jeu qui veut placer un pion a un angle choisi.
+        """
+        self.orientation = normalize_orientation(orientation)
+
 
     def near_initial_position(self, x, y) -> bool:
         """
@@ -118,6 +161,7 @@ class Token (Component):
             "width": self.width,
             "height": self.height,
             "orientation": self.orientation,
+            "orientable": self.orientable,
             "move_border": self.move_border,
             "border": self.border,
             "initial_x": self.initial_x,
