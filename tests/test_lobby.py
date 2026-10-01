@@ -47,20 +47,33 @@ class FakeChabanas(Chabanas):
         self.payloads = []
         self._agent = object()  # prevents building a real Agent
 
-    def _post_json(self, path, payload):
+    # statut renvoye pour /session/join, surcharge par les tests de refus
+    join_status = 200
+    # reponse de /session/join quand join_status n'est pas un succes
+    join_body = b"Unauthorized"
+
+    def _post_json(self, path, payload, with_status=False):
         self.calls.append(path)
         self.payloads.append((path, payload))
         if not self.available:
-            return defer.succeed(False)
+            return self._fired(False, with_status)
         if path == "/session/create":
-            return defer.succeed({"session_code": self.info["code"]})
+            return self._fired({"session_code": self.info["code"]}, with_status)
         if path in ("/session/get", "/session/join"):
-            return defer.succeed({"session": self.info})
+            if path == "/session/join" and self.join_status != 200:
+                return defer.succeed((self.join_status, False))
+            return self._fired({"session": self.info}, with_status)
         if path == "/session/list":
-            return defer.succeed({"sessions": {}})
+            return self._fired({"sessions": {}}, with_status)
         if path == "/game/list":
-            return defer.succeed({"game_list": [{"name": self.info["name"]}]})
-        return defer.succeed({})
+            return self._fired({"game_list": [{"name": self.info["name"]}]}, with_status)
+        return self._fired({}, with_status)
+
+    @staticmethod
+    def _fired(value, with_status):
+        if with_status:
+            value = (200, value)
+        return defer.succeed(value)
 
 
 @pytest.fixture
@@ -124,8 +137,8 @@ class TestJoinSession:
         assert success is True
         assert error is None
         assert guest.session is host.session, "la session du lobby doit etre reutilisee"
-        assert lobby.chabanas.calls == ["/session/create", "/session/get"], (
-            "aucun appel back-end n'etait necessaire"
+        assert lobby.chabanas.calls == ["/session/create", "/session/get", "/session/join"], (
+            "Chabanas doit toujours valider l'adhesion, meme pour une session en cache"
         )
 
     def test_queries_the_back_end_for_an_unknown_code(self, lobby, sync):
@@ -145,18 +158,78 @@ class TestJoinSession:
         assert error == "Unable to join session"
         assert guest.session is None
 
-    def test_no_back_end_call_when_the_session_is_cached(self, lobby, sync, session_info):
-        """The point of the lobby cache: joining a known code never hits the back-end."""
+    def test_a_cached_session_still_asks_the_back_end(self, lobby, sync, session_info):
+        """
+        Regression: joining a code already loaded here used to skip Chabanas
+        entirely, so anyone guessing the code walked in, with any key and
+        without the access_key. Chabanas is the only holder of those secrets, so
+        it must be consulted even for a cached session.
+        """
         host = connect(lobby, "alice")
         sync(lobby.create_session("Waterloo", host, ""))
         lobby.chabanas.calls.clear()
         lobby.chabanas.available = False
         guest = connect(lobby, "bob")
 
+        success, error = sync(lobby.join_session(session_info["code"], guest, "", "player"))
+
+        assert success is False
+        assert "/session/join" in lobby.chabanas.calls
+
+    def test_wrong_access_key_is_refused_for_a_cached_session(self, lobby, sync, session_info):
+        """The access_key of a cached session must be verified, not ignored."""
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.join_status = 401
+        intruder = connect(lobby, "mallory")
+
+        success, error = sync(
+            lobby.join_session(session_info["code"], intruder, "k", "player", "MAUVAISE")
+        )
+
+        assert success is False
+        assert error == "access_key_incorrect"
+        assert intruder.session is None
+        assert [u.name for u in host.session.players] == ["alice"], (
+            "un intrus ne doit pas etre ajoute a la session en cache"
+        )
+
+    def test_watchers_not_allowed_is_refused_for_a_cached_session(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.join_status = 403
+        watcher = connect(lobby, "watcher")
+
+        success, error = sync(
+            lobby.join_session(session_info["code"], watcher, "k", "watcher")
+        )
+
+        assert success is False
+        assert error == "watchers_not_allowed"
+        assert watcher.session is None
+
+    def test_cached_session_keeps_its_state_when_validated(self, lobby, sync, session_info):
+        """
+        Chabanas now answers every join, but its game_json is the stored one: it
+        must not overwrite the board state held in memory here.
+        """
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        # le plateau de test est trop petit pour qu'un coupage change les
+        # coordonnees : on pose directement un etat vivant different de celui
+        # du game_json renvoie par Chabanas
+        token = host.session.components_lists["movable"][0]
+        token.x, token.y = 7, 9
+        moved = (token.x, token.y)
+        guest = connect(lobby, "bob")
+
         success, _ = sync(lobby.join_session(session_info["code"], guest, "", "player"))
 
         assert success is True
-        assert lobby.chabanas.calls == []
+        assert guest.session is host.session
+        assert (token.x, token.y) == moved, (
+            "l'etat vivant de la session ne doit pas etre remplace par le game_json de Chabanas"
+        )
 
 
 class TestCapacityAndRoles:
@@ -201,7 +274,9 @@ class TestCapacityAndRoles:
         success, error = sync(lobby.join_session(session_info["code"], second, "", "watcher"))
 
         assert success is False
-        assert error == "Session is full (1 watchers)"
+        assert error == "watchers_full"
+        assert second.session is None, "un spectateur refuse ne doit pas avoir de session"
+        assert [u.name for u in host.session.watchers] == ["w1"]
 
     def test_watchers_do_not_consume_player_seats(self, full_lobby, sync, session_info):
         lobby, host, _ = full_lobby

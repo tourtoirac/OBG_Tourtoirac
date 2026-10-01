@@ -46,6 +46,15 @@ class Backend(resource.Resource):
             if body.get("session_code") == "INCONNU":
                 request.setResponseCode(404)
                 return b'{"error":"not found"}'
+            if body.get("access_key") == "MAUVAISE":
+                request.setResponseCode(401)
+                return b"Unauthorized"
+            if body.get("role") == "watcher" and SESSION["name"] == "Waterloo":
+                request.setResponseCode(403)
+                return b"Conflict"
+            if body.get("role") == "admin":
+                request.setResponseCode(400)
+                return b"Bad Request"
             return json.dumps({"session": SESSION}).encode()
 
         if path == "/session/list":
@@ -118,11 +127,39 @@ class TestSuccessfulCalls:
         """
         join_session used to return the whole response body while create_session
         returned ['session'], so callers indexing ['name'] raised KeyError.
+        It now returns (session, None) so the caller can tell a refusal from a
+        session it could not read.
         """
-        session = sync(chabanas.join_session("CODE1", FakeUser(), ""))
+        session, reason = sync(chabanas.join_session("CODE1", FakeUser(), ""))
 
+        assert reason is None
         assert session["name"] == "Waterloo"
         assert session["key"] == "KEY1"
+
+    def test_join_session_forwards_access_key_and_role(self, chabanas, sync):
+        """Chabanas is the only one able to check the access_key, so it must be sent."""
+        session, reason = sync(
+            chabanas.join_session("CODE1", FakeUser(), "key", "MAUVAISE", "player")
+        )
+
+        assert session is None
+        assert reason == "access_key_incorrect"
+
+    def test_join_session_reports_watchers_not_allowed(self, chabanas, sync):
+        session, reason = sync(
+            chabanas.join_session("CODE1", FakeUser(), "key", "", "watcher")
+        )
+
+        assert session is None
+        assert reason == "watchers_not_allowed"
+
+    def test_join_session_reports_an_invalid_role(self, chabanas, sync):
+        session, reason = sync(
+            chabanas.join_session("CODE1", FakeUser(), "key", "", "admin")
+        )
+
+        assert session is None
+        assert reason == "invalid_role"
 
     def test_get_active_sessions(self, chabanas, sync):
         assert sync(chabanas.get_active_sessions(["Waterloo"], [])) == {
@@ -143,7 +180,11 @@ class TestFailureHandling:
         assert sync(chabanas.create_session("Inconnu", FakeUser(), "k")) is False
 
     def test_join_session_http_error(self, chabanas, sync):
-        assert sync(chabanas.join_session("INCONNU", FakeUser(), "")) is False
+        """A 404 is an unknown session, not a wrong access_key."""
+        session, reason = sync(chabanas.join_session("INCONNU", FakeUser(), ""))
+
+        assert session is None
+        assert reason == "Unable to join session"
 
     def test_get_active_sessions_http_error(self, chabanas, sync):
         assert sync(chabanas.get_active_sessions(["Casse"], [])) == {}

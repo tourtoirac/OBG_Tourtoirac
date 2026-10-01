@@ -82,21 +82,28 @@ class Lobby:
         return True, None
 
     @defer.inlineCallbacks
-    def join_session(self, session_code: str, user: User, key: str = "", role: str = "player"):
+    def join_session(self, session_code: str, user: User, key: str = "", role: str = "player", access_key: str = ""):
         self.logger.debug(f"Trying to find opened session with code {session_code}")
 
-        session = self._find_session_by_code(session_code)
+        # Chabanas est seul juge : c'est lui qui connait l'access_key de la
+        # partie et la key de chaque pseudo. On l'interroge donc toujours, meme
+        # quand la session est deja chargee ici, sinon on laisserait rejoindre
+        # n'importe qui avec un code devine.
+        session_info, reason = yield self.chabanas.join_session(
+            session_code, user, key, access_key, role
+        )
+        if not session_info:
+            return False, reason
 
+        session = self._find_session_by_code(session_code)
         if session is None:
-            # checks if a user can join an already existing session
-            self.logger.debug(f"Session with code {session_code} not found. Checking if it can be started")
-            session_info = yield self.chabanas.join_session(session_code, user, key)
-            if not session_info:
-                return False, "Unable to join session"
+            # premiere adhésion : la session n'est pas encore en memoire
             session = self._build_session(session_info)
             self.add_session(session)
         else:
             self.logger.debug(f"Session with code {session_code} found in lobby")
+            # la session vit deja ici : on garde son etat (jetons deplaces) et on
+            # ignore le game_json renvoie par Chabanas, qui est celui du stockage
 
         success, reason = session.add_user(user, role)
         if not success:

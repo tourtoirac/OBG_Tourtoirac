@@ -151,7 +151,9 @@ class Session:
                 return True, None
             case 'watcher':
                 if len(self.watchers) >= self.max_watchers:
-                    return False, f"Session is full ({self.max_watchers} watchers)"
+                    # code stable : le client doit pouvoir dire a l'utilisateur
+                    # que la partie refuse des spectateurs, pas qu'elle est pleine
+                    return False, "watchers_full"
                 self.watchers.append(user)
                 user.role = 'watcher'
                 return True, None

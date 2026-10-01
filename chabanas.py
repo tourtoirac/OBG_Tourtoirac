@@ -47,12 +47,15 @@ class Chabanas:
             self._agent = Agent(reactor, connectTimeout=self.timeout)
         return self._agent
 
-    def _post_json(self, path, payload):
+    def _post_json(self, path, payload, with_status=False):
         """
         Asynchronously POSTs payload as JSON to the back-end.
         Fires with the decoded response body, or False on any failure
         (network error, timeout, undecodable body) so that callers keep
         a simple truthiness check without risking an unhandled Failure.
+
+        With with_status=True it fires with (status, body) instead, so a caller
+        that must tell a refusal from a success can look at the status code.
         """
         url = f"{self.host_url}{path}"
         body = json.dumps(payload).encode("utf-8")
@@ -67,15 +70,28 @@ class Chabanas:
             BytesBodyProducer(body),
         )
         deferred.addTimeout(self.timeout, reactor)
-        deferred.addCallback(self._decode_response)
+        if with_status:
+            deferred.addCallback(self._decode_response_with_status)
+        else:
+            deferred.addCallback(self._decode_response)
         deferred.addErrback(self._log_failure, f"POST {url}")
         return deferred
 
-    def _decode_response(self, response):
-        self.logger.debug(f"Chabanas response: {response.code}")
+    def _decode_body(self, response):
+        """The decoded body, or False if it is not JSON (an error page)."""
         body = readBody(response)
         body.addCallback(lambda raw: json.loads(raw.decode("utf-8")))
         body.addErrback(self._log_failure, "Reading chabanas response body")
+        return body
+
+    def _decode_response(self, response):
+        self.logger.debug(f"Chabanas response: {response.code}")
+        return self._decode_body(response)
+
+    def _decode_response_with_status(self, response):
+        self.logger.debug(f"Chabanas response: {response.code}")
+        body = self._decode_body(response)
+        body.addCallback(lambda decoded: (response.code, decoded))
         return body
 
     def _log_failure(self, reason, context):
@@ -130,22 +146,42 @@ class Chabanas:
         return self._extract_session(session_info)
 
     @defer.inlineCallbacks
-    def join_session(self, session_code: str, user: User, key: str):
-        # Call back-end to find out if user can join a session
-        response = yield self._post_json("/session/join", {
+    def join_session(self, session_code: str, user: User, key: str, access_key: str = "", role: str = "player"):
+        """
+        Asks Chabanas whether that user may join. Chabanas alone knows the
+        session's access_key and the key of every nickname, so it is the only
+        place where the decision is made.
+
+        :return: (session_info, None) on success, (None, reason) otherwise.
+        """
+        status, response = yield self._post_json("/session/join", {
             "session_code": session_code,
             "nickname": user.name,
-            "key": key
-        })
+            "key": key,
+            "access_key": access_key,
+            "role": role
+        }, with_status=True)
+
+        if status == 400:
+            # role refuse par Chabanas : aucune ligne Player n'a ete creee
+            return None, "invalid_role"
+        if status == 401:
+            # access_key fausse, ou key différente de celle de ce pseudo
+            return None, "access_key_incorrect"
+        if status == 403:
+            # les spectateurs ne sont pas autorisés sur cette partie
+            return None, "watchers_not_allowed"
+        if status == 409:
+            return None, "session_unavailable"
         if not response:
-            return False
+            return None, "Unable to join session"
         # /session/join returns the session object at the root of the response,
         # while /session/get and /session/get_archive wrap it in {"session": ...}
         session = response.get('session', response)
         if not isinstance(session, dict) or 'key' not in session:
             self.logger.error("[CHABANAS] Response has no session description")
-            return False
-        return session
+            return None, "Unable to join session"
+        return session, None
 
     @defer.inlineCallbacks
     def get_active_sessions(self, game_name_list, sat_list):

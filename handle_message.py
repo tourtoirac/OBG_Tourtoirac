@@ -75,10 +75,22 @@ def create_session(self, logger, message):
         }
     )
 
+# ce que repond l'utilisateur quand l'adhesion est refusee, plutot qu'un
+# "Unable to join session" qui ne l'aide pas a corriger sa saisie
+JOIN_REFUSALS = {
+    "access_key_incorrect": "Wrong access key, or that key is already used by this nickname",
+    "watchers_not_allowed": "This game does not accept spectators",
+    "watchers_full": "This game already has all its spectators",
+    "session_unavailable": "This game is full or locked",
+    "missing_field": "Missing information to join the game",
+    "invalid_role": "Invalid role",
+}
+
+
 @defer.inlineCallbacks
 def join_session(self, logger, message):
     user = self.factory.lobby.get_user(self)
-    required_fields = ["session_code", "nickname", "key", "role"]
+    required_fields = ["session_code", "nickname", "role"]
     for required_field in required_fields:
         if required_field not in message:
             self.send_error(
@@ -89,21 +101,34 @@ def join_session(self, logger, message):
 
     session_code = message["session_code"]
     user.name = message["nickname"]
-    player_key = message["key"]
     role = message["role"]
+    if role not in ("player", "watcher"):
+        self.send_error("invalid_role", JOIN_REFUSALS["invalid_role"])
+        return
+
+    # un spectateur ne fournit pas de key : elle identifie un joueur, il n'en
+    # est pas un. Elle reste obligatoire pour un joueur.
+    if role == "player" and "key" not in message:
+        self.send_error(
+            "missing_field",
+            "The join_session message requires a key field"
+        )
+        return
+    player_key = message.get("key", "")
+    access_key = message.get("access_key", "")
 
     success, error = yield self.factory.lobby.join_session(
         session_code,
         user,
         player_key,
         role,
+        access_key
     )
 
     if not success:
-        self.send_error(
-            error,
-            f"Unable to join session {session_code}"
-        )
+        # un refus d'identifiants doit etre comprenable par le joueur, sinon il
+        # ne saura pas s'il doit ressaisir sa key ou son access_key
+        self.send_error(error, JOIN_REFUSALS.get(error, f"Unable to join session {session_code}"))
     else:
         logger.debug(f"{user.name} joined session {session_code} as {role}")
         user.send({
@@ -215,6 +240,15 @@ def resolve_component_action(self, message, action, required_fields):
         self.send_error(
             "no_session",
             f"The {action} action requires an active session"
+        )
+        return None, None, False
+
+    # un spectateur regarde : il ne touche pas aux composants. Le refus est ici,
+    # sur le serveur, pas seulement dans le client, qui peut sendsans y etre.
+    if user.role != "player":
+        self.send_error(
+            "watcher_not_allowed",
+            "Only players can act on the components of the game"
         )
         return None, None, False
 

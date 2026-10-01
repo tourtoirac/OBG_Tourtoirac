@@ -30,19 +30,24 @@ class FakeChabanas(Chabanas):
         self.calls = []
         self._agent = object()
 
-    def _post_json(self, path, payload):
+    def _post_json(self, path, payload, with_status=False):
         self.calls.append(path)
         if path == "/session/create":
-            return defer.succeed({"session_code": self.info["code"]})
-        if path in ("/session/get", "/session/join"):
+            body = {"session_code": self.info["code"]}
+        elif path in ("/session/get", "/session/join"):
             if payload.get("session_code") not in (self.info["code"], "CODE1"):
-                return defer.succeed(False)  # the back-end refuses unknown codes
-            return defer.succeed({"session": self.info})
-        if path == "/session/list":
-            return defer.succeed({"sessions": {}})
-        if path == "/game/list":
-            return defer.succeed({"game_list": [{"name": self.info["name"]}]})
-        return defer.succeed({})
+                body = False  # the back-end refuses unknown codes
+            else:
+                body = {"session": self.info}
+        elif path == "/session/list":
+            body = {"sessions": {}}
+        elif path == "/game/list":
+            body = {"game_list": [{"name": self.info["name"]}]}
+        else:
+            body = {}
+        if with_status:
+            return defer.succeed((404 if body is False else 200, body))
+        return defer.succeed(body)
 
 
 class Protocol(GameWebSocketProtocol):
@@ -164,6 +169,104 @@ class TestDispatch:
             "nickname": "bob", "key": "",
         })
         assert client.last_error() == "missing_field"
+
+    def test_join_session_requires_a_key_for_a_player(self, client):
+        receive(client, {
+            "action": "join_session", "session_code": "X",
+            "nickname": "bob", "role": "player",
+        })
+        assert client.last_error() == "missing_field"
+
+    def test_watcher_joins_without_a_key(self, lobby, client, session_info):
+        """
+        A spectator has no key: only a nickname and, when the creator set one,
+        the access key. Rejecting the message for a missing key would make the
+        button unusable.
+        """
+        receive(client, {
+            "action": "create_session", "game_name": "Waterloo",
+            "nickname": "alice", "key": "",
+        })
+
+        watcher_proto = Protocol(lobby)
+        lobby.add_user(User(name="anonymous", protocol=watcher_proto))
+        receive(watcher_proto, {
+            "action": "join_session", "session_code": session_info["code"],
+            "nickname": "carol", "role": "watcher",
+        })
+
+        assert watcher_proto.last_event() == "session_joined"
+        assert watcher_proto.last["role"] == "watcher"
+        watcher = lobby.get_user(watcher_proto)
+        assert watcher.acquired == []
+        assert [u.name for u in watcher.session.players] == ["alice"], (
+            "un spectateur ne doit pas occuper un siege de joueur"
+        )
+
+    def test_watcher_cannot_acquire(self, lobby, client, session_info):
+        receive(client, {
+            "action": "create_session", "game_name": "Waterloo",
+            "nickname": "alice", "key": "",
+        })
+        watcher_proto = Protocol(lobby)
+        lobby.add_user(User(name="anonymous", protocol=watcher_proto))
+        receive(watcher_proto, {
+            "action": "join_session", "session_code": session_info["code"],
+            "nickname": "carol", "role": "watcher",
+        })
+        watcher = lobby.get_user(watcher_proto)
+        watcher_proto.clear()
+
+        receive(watcher_proto, {"action": "acquire", "component_id": "t1"})
+
+        assert watcher_proto.last_error() == "watcher_not_allowed"
+        assert watcher.acquired == [], "un spectateur ne prend rien en main"
+        token = watcher.session.get_component("t1")
+        assert token.acquired_by is None, "le jeton reste disponible"
+
+    def test_watcher_cannot_move_or_release(self, lobby, client, session_info):
+        receive(client, {
+            "action": "create_session", "game_name": "Waterloo",
+            "nickname": "alice", "key": "",
+        })
+        watcher_proto = Protocol(lobby)
+        lobby.add_user(User(name="anonymous", protocol=watcher_proto))
+        receive(watcher_proto, {
+            "action": "join_session", "session_code": session_info["code"],
+            "nickname": "carol", "role": "watcher",
+        })
+        watcher = lobby.get_user(watcher_proto)
+
+        receive(watcher_proto, {"action": "move", "component_id": "t1", "x": 42, "y": 24})
+        assert watcher_proto.last_error() == "watcher_not_allowed"
+        assert (watcher.session.get_component("t1").x) == 1
+
+        watcher_proto.clear()
+        receive(watcher_proto, {"action": "release", "component_id": "t1"})
+        assert watcher_proto.last_error() == "watcher_not_allowed"
+
+    def test_fix_positions_stays_reserved_for_players(self, lobby, client, session_info):
+        receive(client, {
+            "action": "create_session", "game_name": "Waterloo",
+            "nickname": "alice", "key": "",
+        })
+        watcher_proto = Protocol(lobby)
+        lobby.add_user(User(name="anonymous", protocol=watcher_proto))
+        receive(watcher_proto, {
+            "action": "join_session", "session_code": session_info["code"],
+            "nickname": "carol", "role": "watcher",
+        })
+
+        receive(watcher_proto, {"action": "fix_positions"})
+
+        assert watcher_proto.last_error() == "watcher_not_allowed"
+
+    def test_join_session_rejects_an_unknown_role(self, client):
+        receive(client, {
+            "action": "join_session", "session_code": "X",
+            "nickname": "mallory", "key": "", "role": "admin",
+        })
+        assert client.last_error() == "invalid_role"
 
     def test_join_session_error_is_well_formed(self, client):
         """
