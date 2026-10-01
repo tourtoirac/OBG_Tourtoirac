@@ -46,7 +46,9 @@ class Session:
         self.load_session_components()
 
     def load_session_components(self):
-        for list_name in ("fixed", "movable"):
+        # un dé est accepté dans les trois listes : il n'est ni un plateau ni un
+        # pion, donc l'endroit où le jeu le déclare ne regarde pas la session
+        for list_name in ("fixed", "movable", "dice"):
             for component in self.game_json.get(list_name, []):
                 match component['kind']:
                     case 'board':
@@ -102,7 +104,10 @@ class Session:
             component['width'],
             component['height'],
             component['src_list'],
-            list_name
+            list_name,
+            # delai de relance en secondes, propre au jeu ; absent du game_json
+            # c'est Dice qui applique son defaut
+            component.get('roll_delay')
         )
         self.components_lists['dice'].append(game_component)
         self.components_dict[component['id']] = game_component

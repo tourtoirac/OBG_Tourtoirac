@@ -15,7 +15,7 @@ autobahn = pytest.importorskip("autobahn", reason="autobahn[twisted] is required
 from conftest import SESSION_INFO  # noqa: E402
 from twisted.internet import defer  # noqa: E402
 
-from Components.dice import ROLL_COOLDOWN_SECONDS, Dice  # noqa: E402
+from Components.dice import DEFAULT_ROLL_DELAY_SECONDS, Dice, read_roll_delay  # noqa: E402
 from chabanas import Chabanas  # noqa: E402
 from lobby import Lobby  # noqa: E402
 from main import GameWebSocketFactory, GameWebSocketProtocol  # noqa: E402
@@ -37,11 +37,13 @@ DICE_JSON = {
 }
 
 
-def session_info_with_dice(where="fixed"):
+def session_info_with_dice(where="fixed", **fields):
     """The shared session description, with the dice added to one list."""
     info = json.loads(json.dumps(SESSION_INFO))
     game_json = info["game_json"]
-    game_json.setdefault(where, []).append(json.loads(json.dumps(DICE_JSON)))
+    dice = dict(DICE_JSON)
+    dice.update(fields)
+    game_json.setdefault(where, []).append(dice)
     return info
 
 
@@ -112,8 +114,8 @@ def receive(protocol, message):
     protocol.onMessage(json.dumps(message).encode(), False)
 
 
-def make_lobby(where="fixed"):
-    return Lobby(LOGGER, FakeChabanas(session_info_with_dice(where)))
+def make_lobby(where="fixed", **fields):
+    return Lobby(LOGGER, FakeChabanas(session_info_with_dice(where, **fields)))
 
 
 def open_session(lobby, nickname="alice"):
@@ -226,7 +228,7 @@ class TestDiceRoll:
         assert len(rolls) == 1, "la face doit etre diffusee a tout l'ecran"
         assert rolls[0]["src"] in DICE_FACES
         assert rolls[0]["component_id"] == "dice"
-        assert rolls[0]["cooldown_seconds"] == ROLL_COOLDOWN_SECONDS
+        assert rolls[0]["cooldown_seconds"] == DEFAULT_ROLL_DELAY_SECONDS
 
     def test_everyone_in_the_session_sees_the_same_face(self, player):
         lobby = player.factory.lobby
@@ -257,7 +259,7 @@ class TestDiceRoll:
         """Not a constant: two launches far enough apart are independent."""
         dice = only_session(player.factory.lobby).get_component("dice")
         first = dice.roll()
-        dice.rolled_at -= ROLL_COOLDOWN_SECONDS
+        dice.rolled_at -= DEFAULT_ROLL_DELAY_SECONDS
         second = dice.roll()
 
         assert first in DICE_FACES and second in DICE_FACES
@@ -267,7 +269,7 @@ class TestDiceRoll:
         receive(player, {"action": "roll", "component_id": "dice"})
         player.clear()
         # on fait vieillir le dernier lancer de la durée exacte du délai
-        dice.rolled_at -= ROLL_COOLDOWN_SECONDS
+        dice.rolled_at -= DEFAULT_ROLL_DELAY_SECONDS
 
         receive(player, {"action": "roll", "component_id": "dice"})
 
@@ -278,7 +280,7 @@ class TestDiceRoll:
         dice = only_session(player.factory.lobby).get_component("dice")
         receive(player, {"action": "roll", "component_id": "dice"})
         player.clear()
-        dice.rolled_at -= ROLL_COOLDOWN_SECONDS - 1.0
+        dice.rolled_at -= DEFAULT_ROLL_DELAY_SECONDS - 1.0
 
         receive(player, {"action": "roll", "component_id": "dice"})
 
@@ -350,3 +352,114 @@ class TestFixPositionsWithADice:
         fixed = only_session(lobby).fix_positions()
 
         assert all(c.get("kind") != "dice" for c in fixed)
+
+
+class TestConfigurableRollDelay:
+    """
+    roll_delay vient du game_json du jeu : c'est lui qui dit combien de
+    secondes un dé reste injouable après un lancer.
+    """
+
+    def test_the_delay_comes_from_the_game_json(self):
+        lobby = make_lobby("fixed", roll_delay=3)
+        open_session(lobby)
+
+        assert only_session(lobby).get_component("dice").roll_delay == 3.0
+
+    def test_the_delay_is_announced_to_the_client(self):
+        protocol = open_session(make_lobby("fixed", roll_delay=3))
+
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+
+        assert protocol.events("roll")[0]["cooldown_seconds"] == 3.0
+
+    def test_the_delay_is_in_the_session_json(self):
+        lobby = make_lobby("fixed", roll_delay=3)
+        open_session(lobby)
+
+        dice = only_session(lobby).return_session_json()["components"]["dice"][0]
+
+        assert dice["roll_delay"] == 3.0
+
+    def test_a_shorter_delay_is_honoured(self):
+        protocol = open_session(make_lobby("fixed", roll_delay=1))
+        dice = only_session(protocol.factory.lobby).get_component("dice")
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+        protocol.clear()
+        # au bout d'une seconde, le dé doit de nouveau accepter un lancer
+        dice.rolled_at -= 1.0
+
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+
+        assert len(protocol.events("roll")) == 1
+        assert protocol.last_error() is None
+
+    def test_a_shorter_delay_still_refuses_the_click_before_it_is_up(self):
+        protocol = open_session(make_lobby("fixed", roll_delay=3))
+        dice = only_session(protocol.factory.lobby).get_component("dice")
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+        protocol.clear()
+        # le délai du jeu est de 3 s : 2 s après, c'est encore trop tôt
+        dice.rolled_at -= 2.0
+
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+
+        assert protocol.last_error() == "dice_cooling_down"
+
+    def test_a_zero_delay_lets_the_dice_be_rolled_freely(self):
+        protocol = open_session(make_lobby("fixed", roll_delay=0))
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+        protocol.clear()
+
+        receive(protocol, {"action": "roll", "component_id": "dice"})
+
+        assert len(protocol.events("roll")) == 1
+
+    def test_a_missing_delay_falls_back_to_the_default(self):
+        lobby = make_lobby("fixed")
+        open_session(lobby)
+
+        assert only_session(lobby).get_component("dice").roll_delay == (
+            DEFAULT_ROLL_DELAY_SECONDS
+        )
+
+    @pytest.mark.parametrize("value", [
+        "trois",       # une chaîne n'est pas un délai
+        None,          # champ absent du game_json
+        -2,            # un délai négatif ne veut rien dire
+        True,          # un booléen n'est pas un nombre de secondes
+        [3],
+    ])
+    def test_an_unusable_delay_falls_back_instead_of_breaking(self, value):
+        lobby = make_lobby("fixed", roll_delay=value)
+        open_session(lobby)
+
+        assert only_session(lobby).get_component("dice").roll_delay == (
+            DEFAULT_ROLL_DELAY_SECONDS
+        )
+
+    def test_the_delay_survives_the_saved_state(self):
+        lobby = make_lobby("fixed", roll_delay=3)
+        open_session(lobby)
+        session = only_session(lobby)
+
+        state = session.game_json_state()
+        saved = next(c for c in state["fixed"] if c.get("kind") == "dice")
+
+        assert saved["roll_delay"] == 3.0
+
+
+class TestReadRollDelay:
+    @pytest.mark.parametrize("value,expected", [
+        (3, 3.0),
+        (0, 0.0),
+        (12, 12.0),
+        (1.5, 1.5),
+        (None, DEFAULT_ROLL_DELAY_SECONDS),
+        ("3", DEFAULT_ROLL_DELAY_SECONDS),
+        (-1, DEFAULT_ROLL_DELAY_SECONDS),
+        (True, DEFAULT_ROLL_DELAY_SECONDS),
+        (False, DEFAULT_ROLL_DELAY_SECONDS),
+    ])
+    def test_read_roll_delay(self, value, expected):
+        assert read_roll_delay(value) == expected
