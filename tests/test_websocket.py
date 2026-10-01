@@ -170,12 +170,25 @@ class TestDispatch:
         })
         assert client.last_error() == "missing_field"
 
-    def test_join_session_requires_a_key_for_a_player(self, client):
+    def test_join_session_accepts_a_player_without_a_key(self, lobby, client, session_info):
+        """
+        The user key is optional: the message is forwarded to the back-end,
+        which is the only place entitled to open a seat.
+        """
         receive(client, {
-            "action": "join_session", "session_code": "X",
+            "action": "create_session", "game_name": "Waterloo",
+            "nickname": "alice", "key": "",
+        })
+        peer = Protocol(lobby)
+        lobby.add_user(User(name="anonymous", protocol=peer))
+        receive(peer, {
+            "action": "join_session", "session_code": session_info["code"],
             "nickname": "bob", "role": "player",
         })
-        assert client.last_error() == "missing_field"
+
+        assert peer.last_event() == "session_joined"
+        assert peer.last["role"] == "player"
+        assert "/session/join" in lobby.chabanas.calls
 
     def test_watcher_joins_without_a_key(self, lobby, client, session_info):
         """

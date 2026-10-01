@@ -106,14 +106,8 @@ def join_session(self, logger, message):
         self.send_error("invalid_role", JOIN_REFUSALS["invalid_role"])
         return
 
-    # un spectateur ne fournit pas de key : elle identifie un joueur, il n'en
-    # est pas un. Elle reste obligatoire pour un joueur.
-    if role == "player" and "key" not in message:
-        self.send_error(
-            "missing_field",
-            "The join_session message requires a key field"
-        )
-        return
+    # la clé d'utilisateur est facultative : Chabanas décide de créer un
+    # nouveau siège ou de reconnaître un joueur déjà connu
     player_key = message.get("key", "")
     access_key = message.get("access_key", "")
 
