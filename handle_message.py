@@ -475,6 +475,43 @@ def rotate(self, logger, message):
     })
 
 
+def flip(self, logger, message):
+    """
+    Retourne un pion. Le client ne fait que le demander : c'est le serveur qui
+    verifie que le pion a une seconde face, qui choisit laquelle, et qui la
+    diffuse a tous les ecrans.
+    """
+    logger.debug("Process flip message")
+    user, component, ready = resolve_component_action(
+        self, message, "flip", ["component_id"]
+    )
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    # seuls les pions qui ont une image de dos se retournent : un compteur a une
+    # seule face, un plateau ou un de renvoyes ici ne changent pas d'image
+    if not component.flippable():
+        self.send_error(
+            "component_not_flippable",
+            f"Component {component_id} cannot be flipped"
+        )
+        return
+
+    # un pion en main se retourne quand meme : changer de face ne le deplace
+    # pas, et c'est souvent le joueur qui le tient qui veut le retourner
+    component.flip()
+    # la face est diffusee a tous, joueurs comme spectateurs : chaque ecran
+    # montre le meme pion, sur la meme face
+    user.session.send({
+        "event": "flip",
+        "component_id": component_id,
+        "side": component.side,
+        "front_src": component.image_src["front"],
+        "back_src": component.image_src["back"],
+    })
+
+
 def fix_positions(self, logger, message):
     logger.debug("Process fix_positions message")
     user = self.factory.lobby.get_user(self)

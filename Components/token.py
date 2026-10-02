@@ -27,16 +27,18 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0, side=None):
         super().__init__(component_id)
         self.kind = 'token'
         self.x = x
         self.y = y
-        self.side = 'front'
         self.image_src = {
             "front": front_image,
             "back": back_image
         }
+        # face affichee : une session reprise rend chaque pion sur la face qu'il
+        # montrait. Un dos absent ramene toujours sur la face, faute d'image.
+        self.side = 'back' if side == 'back' and back_image is not None else 'front'
         self.src = self.image_src[self.side]
         self.width = width
         self.height = height
@@ -89,19 +91,32 @@ class Token (Component):
 
     def acquire(self, user: User):
         if self.acquired_by is not None and self.acquired_by != user:
+            print(f"acquired by: {self.acquired_by}")
+            print(f"user: {user}")
+            print(f"Tried to acquire {self.id} by {user.id}, but {self.acquired_by.id} already has it")
             return False
         self.acquired_by = user
         if self.id not in user.acquired:
             user.acquire(self.id)
         return True
 
+    def flippable(self) -> bool:
+        """
+        Un jeton ne se retourne que si son game_json lui donne une image de dos.
+        Un compteur a une seule face n'a rien a reveler : il reste tel quel.
+        :return: True quand le jeton a une seconde face
+        """
+        return self.image_src['back'] is not None
+
     def flip(self):
-        if self.side == 'front' and self.image_src['back'] is not None:
-            self.side = 'back'
-            self.src = self.image_src[self.side]
-        else:
-            self.side = 'front'
-            self.src = self.image_src[self.side]
+        """
+        Retourne le jeton, face avant puis face arriere. Un jeton sans image de
+        dos garde sa face plutot que de pointer vers une image absente.
+        """
+        if not self.flippable():
+            return
+        self.side = 'back' if self.side == 'front' else 'front'
+        self.src = self.image_src[self.side]
 
     def move(self, x, y, user: User):
         if self.acquired_by == user:

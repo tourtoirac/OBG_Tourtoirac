@@ -42,6 +42,15 @@ class Component:
         """
         pass
 
+    def flippable(self) -> bool:
+        """
+        Whether this component shows another face when turned over. Only a
+        token whose game_json gives it a back_src does: a counter with a single
+        image has nothing to reveal.
+        :return: True when the component may be flipped
+        """
+        return False
+
     def flip(self):
         """
         placeholder function

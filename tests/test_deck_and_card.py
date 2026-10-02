@@ -1,9 +1,10 @@
 """
 Tests for Deck and Card behaviour.
 
-Both classes are currently unreachable from the WebSocket layer (no `add` or
-`flip` action is exposed, and Session.load_session_components only builds
-boards and tokens), so these are latent bugs guarded against regressions.
+These two classes are still unreachable from the WebSocket layer (no `add`
+action is exposed, and Session.load_session_components only builds boards,
+tokens and dice), so they are latent bugs guarded against regressions. The flip
+action does reach the tokens, which are covered by test_token_flip.py.
 """
 import pytest
 

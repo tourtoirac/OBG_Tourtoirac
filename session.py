@@ -93,7 +93,11 @@ class Session:
                             # orientable : le jeu autorise-t-il les zones de rotation
                             component.get('orientable', False),
                             # orientation : l'angle atteint avant la sauvegarde
-                            component.get('orientation', 0)
+                            component.get('orientation', 0),
+                            # side : la face que le pion montrait avant la
+                            # sauvegarde ; absent d'un game_json de jeu, le
+                            # pion commence alors sur sa face
+                            component.get('side')
                         )
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component
