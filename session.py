@@ -43,6 +43,11 @@ class Session:
         self.players = []
         self.watchers = []
         self.game_json = game_json
+        # options du jeu : bloc libre, recopie pour ne jamais écrire dans le
+        # game_json source. options.fix_positions porte la position du bouton
+        # "Fixe la position" ; null demande de le masquer.
+        options = game_json.get("options")
+        self.options = dict(options) if isinstance(options, dict) else {}
         self.empty_since = None
         # Chabanas est seul juge de l'ownership : le pseudo du createur arrive
         # dans la description de session. Aucun client ne peut s'octroyer ce
@@ -176,6 +181,16 @@ class Session:
                 saved[key] = round(value)
         return saved
 
+    def fix_positions_disabled(self) -> bool:
+        """
+        Le jeu peut masquer le bouton "Fixe la position" en posant
+        options.fix_positions = null dans son game_json. Absent, le bouton reste
+        affiché à la position par défaut : la clé n'ayant jamais servi, on ne
+        change pas le comportement des jeux existants.
+        :return: bool
+        """
+        return self.options.get("fix_positions", "default") is None
+
     def return_session_json(self) -> dict:
         """
         returns the description of the session
@@ -187,6 +202,7 @@ class Session:
             "owner": self.owner_nickname,
             "max_players": self.max_players,
             "max_watchers": self.max_watchers,
+            "options": self.options,
             "players": f"{len(self.players)}/{self.max_players}",
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
             "components": {

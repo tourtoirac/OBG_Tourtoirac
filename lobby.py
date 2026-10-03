@@ -23,9 +23,26 @@ class Lobby:
         Returns a list of the active sessions of the lobby
         """
         active = yield self.chabanas.get_active_sessions(game_name_list, sat_list)
+        self._mark_connected_players(active)
         return {
             "active": active,
         }
+
+    def _mark_connected_players(self, active: dict) -> None:
+        """
+        Chabanas liste tous les sieges jamais pris dans une session, connectes ou
+        non. Le lobby doit savoir qui est reellement assis a la table pour ne pas
+        laisser reprendre un pseudo deja en jeu. Les sessions en memoire sont le
+        seul endroit qui connait les connexions vivantes.
+        """
+        for sessions in active.values():
+            for session_info in sessions:
+                live = self._find_session_by_code(session_info.get("code"))
+                online = set()
+                if live is not None:
+                    online = {user.name for user in live.players + live.watchers}
+                for player in session_info.get("players") or []:
+                    player["connected"] = player.get("nickname") in online
 
     @staticmethod
     def _owner_of(session_info: dict) -> str | None:
@@ -108,6 +125,14 @@ class Lobby:
     @defer.inlineCallbacks
     def join_session(self, session_code: str, user: User, key: str = "", role: str = "player", access_key: str = ""):
         self.logger.debug(f"Trying to find opened session with code {session_code}")
+
+        # un pseudo actuellement assis a la table ne peut pas etre repris par une
+        # autre connexion, meme en connaissant sa key : le siege est occupe. Une
+        # place liberee (joueur deconnecte) reste reprenable, et c'est alors
+        # Chabanas qui tranche avec sa key.
+        sitting = self._find_session_by_code(session_code)
+        if sitting is not None and sitting.find_user(user.name) is not None:
+            return False, "nickname_connected"
 
         # Chabanas est seul juge : c'est lui qui connait l'access_key de la
         # partie et la key de chaque pseudo. On l'interroge donc toujours, meme

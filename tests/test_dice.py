@@ -345,6 +345,16 @@ class TestFixPositionsWithADice:
 
         assert protocol.last_event() == "fix_positions"
 
+    def test_fix_positions_is_refused_when_the_game_hides_the_button(self):
+        lobby = make_lobby("fixed")
+        protocol = open_session(lobby)
+        only_session(lobby).options["fix_positions"] = None
+        protocol.clear()
+
+        receive(protocol, {"action": "fix_positions"})
+
+        assert protocol.last_error() == "fix_positions_disabled"
+
     def test_the_dice_is_not_listed_among_the_fixed_counters(self):
         lobby = make_lobby("fixed")
         open_session(lobby)

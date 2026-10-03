@@ -97,6 +97,7 @@ JOIN_REFUSALS = {
     "missing_field": "Missing information to join the game",
     "invalid_role": "Invalid role",
     "session_closed": "This game is closed",
+    "nickname_connected": "This nickname is already playing",
 }
 
 
@@ -536,6 +537,14 @@ def fix_positions(self, logger, message):
         self.send_error(
             "watcher_not_allowed",
             "Only players can fix the positions of the counters"
+        )
+        return
+
+    if user.session.fix_positions_disabled():
+        # masquer le bouton ne suffit pas : le client n'est pas une autorisation
+        self.send_error(
+            "fix_positions_disabled",
+            "This game does not offer the fix positions button"
         )
         return
 

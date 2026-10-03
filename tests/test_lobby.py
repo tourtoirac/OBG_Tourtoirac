@@ -46,6 +46,8 @@ class FakeChabanas(Chabanas):
         self.calls = []
         self.payloads = []
         self._agent = object()  # prevents building a real Agent
+        # ce que /session/list renvoie : surcharge par les tests du lobby
+        self.list_response = {"sessions": {}}
 
     # statut renvoye pour /session/join, surcharge par les tests de refus
     join_status = 200
@@ -75,7 +77,7 @@ class FakeChabanas(Chabanas):
             self.info["game_json"] = payload["game_json"]
             return self._fired(True, with_status)
         if path == "/session/list":
-            return self._fired({"sessions": {}}, with_status)
+            return self._fired(self.list_response, with_status)
         if path == "/game/list":
             return self._fired({"game_list": [{"name": self.info["name"]}]}, with_status)
         return self._fired({}, with_status)
@@ -312,7 +314,7 @@ class TestCapacityAndRoles:
         success, error = sync(lobby.join_session(session_info["code"], host, "", "player"))
 
         assert success is False
-        assert error == "User is already in this session"
+        assert error == "nickname_connected"
 
 
 class TestSessionBasics:
@@ -746,6 +748,57 @@ class TestFixPositionsMovesEveryStart:
         assert returned[0]["border"] is True
 
 
+class TestConfigurableFixPositionsButton:
+    """La position du bouton "Fixe la position" est une option du jeu, portée par
+    game_json["options"]. Elle traverse la session telle quelle ; le client en
+    déduit où poser le bouton, ou qu'il ne faut pas l'afficher."""
+
+    def build(self, game_json):
+        return Session(
+            user=None, name="Waterloo", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=game_json,
+        )
+
+    def test_the_session_json_carries_the_game_options(self, session_info):
+        session_info["game_json"]["options"] = {
+            "fix_positions": {"x": 100, "y": 20},
+        }
+
+        described = self.build(session_info["game_json"]).return_session_json()
+
+        assert described["options"] == {"fix_positions": {"x": 100, "y": 20}}
+
+    def test_a_game_without_options_describes_an_empty_block(self, session_info):
+        described = self.build(session_info["game_json"]).return_session_json()
+
+        assert described["options"] == {}
+
+    def test_null_marks_the_button_as_disabled(self, session_info):
+        session_info["game_json"]["options"] = {"fix_positions": None}
+
+        assert self.build(session_info["game_json"]).fix_positions_disabled() is True
+
+    def test_a_position_keeps_the_button_enabled(self, session_info):
+        session_info["game_json"]["options"] = {
+            "fix_positions": {"x": 100, "y": 20},
+        }
+
+        assert self.build(session_info["game_json"]).fix_positions_disabled() is False
+
+    def test_an_absent_option_keeps_the_default_button(self, session_info):
+        assert self.build(session_info["game_json"]).fix_positions_disabled() is False
+
+    def test_the_options_survive_a_save_and_reload(self, session_info):
+        session_info["game_json"]["options"] = {
+            "fix_positions": {"x": 100, "y": 20},
+        }
+        session = self.build(session_info["game_json"])
+
+        reloaded = self.build(session.game_json_state())
+
+        assert reloaded.options == {"fix_positions": {"x": 100, "y": 20}}
+
+
 class TestSavedPositionsAreIntegers:
     """The client divides by the zoom, so positions are floats. Only the saved
     state is rounded: the board keeps sub-pixel precision while dragging."""
@@ -929,6 +982,104 @@ class TestLobbyNotifications:
 
         assert success is False
         assert eve.protocol.sent == []
+
+
+class TestConnectedNicknames:
+    """Un pseudo en train de jouer ne peut pas etre repris par une autre
+    connexion : le siege est occupe, meme en connaissant sa cle. Une place
+    liberee (joueur deconnecte) reste, elle, reprenable."""
+
+    def test_a_nickname_in_play_cannot_be_joined(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.calls.clear()
+        intruder = connect(lobby, "alice")
+
+        success, error = sync(
+            lobby.join_session(session_info["code"], intruder, "", "player")
+        )
+
+        assert success is False
+        assert error == "nickname_connected"
+        assert intruder.session is None
+        assert lobby.chabanas.calls == [], (
+            "un pseudo deja en jeu est refuse avant meme d'interroger Chabanas"
+        )
+        assert [u.name for u in host.session.players] == ["alice"]
+
+    def test_a_connected_watcher_name_is_reserved(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        sync(
+            lobby.join_session(
+                session_info["code"], connect(lobby, "eve"), "", "watcher"
+            )
+        )
+        lobby.chabanas.calls.clear()
+        intruder = connect(lobby, "eve")
+
+        success, error = sync(
+            lobby.join_session(session_info["code"], intruder, "", "player")
+        )
+
+        assert success is False
+        assert error == "nickname_connected"
+        assert intruder.session is None
+
+    def test_a_freed_seat_can_be_joined_again(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        # le dernier participant est parti : la session a ete retiree de la
+        # memoire (son etat est stocke), la place redevient libre
+        lobby.remove_session(host.session)
+        returning = connect(lobby, "alice")
+
+        success, error = sync(
+            lobby.join_session(session_info["code"], returning, "key", "player")
+        )
+
+        assert success is True
+        assert error is None
+        assert returning.session is not None
+        assert [u.name for u in returning.session.players] == ["alice"]
+
+
+class TestConnectedPlayersInLobbyListing:
+    """Chabanas liste tous les sieges, connectes ou non. Le lobby doit pouvoir
+    distinguer les joueurs en jeu pour les afficher comme des places prises."""
+
+    @staticmethod
+    def _listing(session_info, *nicknames):
+        return {
+            "sessions": {
+                "Waterloo": [{
+                    "code": session_info["code"],
+                    "name": "Waterloo",
+                    "players": [
+                        {"nickname": nickname, "owner": index == 0}
+                        for index, nickname in enumerate(nicknames)
+                    ],
+                }],
+            },
+        }
+
+    def test_connected_flag_follows_live_players(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.list_response = self._listing(session_info, "alice", "bob")
+
+        result = sync(lobby.return_active_sessions(["Waterloo"], []))
+        players = result["active"]["Waterloo"][0]["players"]
+
+        assert players[0]["connected"] is True
+        assert players[1]["connected"] is False
+
+    def test_a_seat_nobody_is_watching_is_disconnected(self, lobby, sync, session_info):
+        lobby.chabanas.list_response = self._listing(session_info, "alice")
+
+        result = sync(lobby.return_active_sessions(["Waterloo"], []))
+
+        assert result["active"]["Waterloo"][0]["players"][0]["connected"] is False
 
 
 class TestShutdown:
