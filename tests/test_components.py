@@ -269,6 +269,46 @@ class TestGreenBorder:
         assert data["x"] == 200 and data["y"] == 300
 
 
+class TestTransparentOrigin:
+    """
+    Un pion dont le game_json porte origin="transparent" affiche son image en
+    transparence sur sa case de depart. Lâché sur cette image, il y est recadre
+    même loin du seuil habituel : le fantôme tout entier est une cible.
+    """
+
+    def test_origin_defaults_to_none(self):
+        assert Token("t1", 10, 20, "f.png", "b.png", 3, 4).origin is None
+
+    def test_return_json_exposes_the_origin(self):
+        token = Token("t1", 10, 20, "f.png", "b.png", 3, 4, origin="transparent")
+        assert token.return_json()["origin"] == "transparent"
+
+    def test_dropping_on_the_ghost_snaps_back_beyond_the_threshold(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 100, 100, origin="transparent")
+        token.acquire(user)
+        token.move(200, 300, user)
+
+        # 60 px du départ : au-delà des 30 px habituels, mais sur le fantôme
+        assert token.place(70, 20, user) is True
+        assert (token.x, token.y) == (10, 20)
+        assert token.border is True
+
+    def test_dropping_off_the_ghost_does_not_snap(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 100, 100, origin="transparent")
+        token.acquire(user)
+
+        # le rectangle du fantôme va de 10 à 110 : 115 tombe juste dehors
+        assert token.place(115, 20, user) is True
+        assert (token.x, token.y) == (115, 20), "hors du fantôme, pas de recadrage"
+
+    def test_an_ordinary_token_does_not_get_the_ghost_snap(self, user):
+        token = Token("t1", 10, 20, "f.png", "b.png", 100, 100)
+        token.acquire(user)
+
+        assert token.place(70, 20, user) is True
+        assert (token.x, token.y) == (70, 20), "sans origin, le seuil de 30 px reste seul juge"
+
+
 class TestNonAcquirableComponents:
     def test_base_component_refuses_acquisition(self, user):
         component = Component("x")

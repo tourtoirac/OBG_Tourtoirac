@@ -97,7 +97,10 @@ class Session:
                             # side : la face que le pion montrait avant la
                             # sauvegarde ; absent d'un game_json de jeu, le
                             # pion commence alors sur sa face
-                            component.get('side')
+                            component.get('side'),
+                            # origin : "transparent" fait afficher le fantome du
+                            # pion sur sa case de depart
+                            component.get('origin')
                         )
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component

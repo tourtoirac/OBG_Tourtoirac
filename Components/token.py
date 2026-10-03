@@ -2,8 +2,9 @@ from Components.component import Component
 from user import User
 
 # Un jeton lâché à moins de MOVE_THRESHOLD pixels de sa case de départ est
-# automatiquement recadré dessus. La valeur est en dur dans le code : c'est une
-# règle de jeu, pas un réglage.
+# automatiquement recadré dessus. Un pion "transparent" est recadré sur tout son
+# fantôme, pas seulement dans ce rayon. La valeur est en dur dans le code :
+# c'est une règle de jeu, pas un réglage.
 MOVE_THRESHOLD = 30
 
 # degres : un cran de rotation du pion. Le client ne propose que le sens du
@@ -27,11 +28,15 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0, side=None):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0, side=None, origin=None):
         super().__init__(component_id)
         self.kind = 'token'
         self.x = x
         self.y = y
+        # origin : le jeu peut poser une image du pion en transparence sur sa
+        # case de depart, pour marquer l'endroit ou il doit revenir. Null sur un
+        # pion ordinaire ; "transparent" affiche ce fantome.
+        self.origin = origin
         self.image_src = {
             "front": front_image,
             "back": back_image
@@ -84,10 +89,19 @@ class Token (Component):
         """
         Un jeton est considéré comme posé à sa case de départ s'il est à moins
         de MOVE_THRESHOLD pixels d'elle.
+
+        Un pion dont l'origine est "transparent" affiche un fantome sur sa case
+        de départ : le lâcher sur cette image le ramène chez lui, même si le
+        pointeur vise un coin du fantome plutôt que son centre.
         """
         dx = x - self.initial_x
         dy = y - self.initial_y
-        return dx * dx + dy * dy <= MOVE_THRESHOLD * MOVE_THRESHOLD
+        if dx * dx + dy * dy <= MOVE_THRESHOLD * MOVE_THRESHOLD:
+            return True
+        if self.origin == "transparent":
+            # les deux rectangles se recouvrent : le pion est posé sur l'image
+            return abs(dx) < self.width and abs(dy) < self.height
+        return False
 
     def acquire(self, user: User):
         if self.acquired_by is not None and self.acquired_by != user:
@@ -180,5 +194,6 @@ class Token (Component):
             "move_border": self.move_border,
             "border": self.border,
             "initial_x": self.initial_x,
-            "initial_y": self.initial_y
+            "initial_y": self.initial_y,
+            "origin": self.origin
         }
