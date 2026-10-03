@@ -458,7 +458,7 @@ class TestStoreStateWhenEmpty:
         lobby.delete_user(host)
 
         back = connect(lobby, "alice")
-        assert lobby.resume_session("KEY1", back, "player") == (True, None)
+        assert sync(lobby.join_session("CODE1", back, "", "player", "")) == (True, None)
         lobby.delete_user(back)
 
         assert len(self.updates(lobby)) == 2
@@ -471,7 +471,7 @@ class TestStoreStateWhenEmpty:
 
         lobby.delete_user(host)
 
-        assert host.session.key in lobby.sessions
+        assert host.session.key not in lobby.sessions
 
     def test_a_back_end_failure_does_not_break_disconnection(self, lobby, sync):
         host = connect(lobby, "alice")

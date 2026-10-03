@@ -264,30 +264,33 @@ class Lobby:
 
     def _save_state_if_empty(self, session: Session):
         """
-        Stores the current situation of the session as soon as nobody is left in
-        it, so it can be resumed later on. The session is kept in the lobby:
-        players coming back find the state they left.
+        Removes the session from memory as soon as nobody is left in it
+        (no players, no watchers). The session will be recreated from the
+        persisted state on the next join.
         """
-        # une partie closee a deja ete stockee puis archivee : la reecrire quand
-        # son dernier spectateur part ne servirait a rien
+        # une partie closee a deja ete stockee puis archivee : on ne la supprime
+        # pas automatiquement ici
         if session.closed:
             return
         if session.players or session.watchers:
             return
         if session.empty_since is not None:
-            # already stored for this empty period
+            # already handled for this empty period
+            self.remove_session(session)
             return
         session.empty_since = True
         state = session.game_json_state()
         self.logger.info(
-            f"[SESSION] {session.key} is now empty, storing its state "
+            f"[SESSION] {session.key} is now empty, removing from lobby "
             f"({len(state['movable'])} movable components)"
         )
         deferred = self.chabanas.update_session_state(session.key, state)
+        deferred.addCallback(lambda _: self.remove_session(session))
         deferred.addErrback(
             self.chabanas._log_failure,
             f"[LOBBY] Storing the state of session {session.key}"
         )
+        deferred.addErrback(lambda _: self.remove_session(session))
 
     def delete_user(self, user: User):
         if user is None:
