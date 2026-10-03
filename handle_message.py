@@ -359,6 +359,10 @@ def release(self, logger, message):
     if "x" in message and "y" in message:
         component.place(message["x"], message["y"], user)
     released = component.release(user)
+    if released:
+        # un pion relâché se pose au-dessus de la pile : il repasse en fin de
+        # liste, l'ordre que le client dessine et que la sauvegarde conserve
+        user.session.bring_to_front(component)
     release_message = {
                 "event": "release",
                 "component_id" : component_id,

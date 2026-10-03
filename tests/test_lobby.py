@@ -799,6 +799,58 @@ class TestConfigurableFixPositionsButton:
         assert reloaded.options == {"fix_positions": {"x": 100, "y": 20}}
 
 
+class TestReleasedCounterGoesOnTop:
+    """Un pion relâché passe en fin de la liste des déplaçables : c'est l'ordre
+    que le client dessine, donc il apparaît au-dessus de la pile qu'il rejoint.
+    L'ordre est ainsi conservé à la sauvegarde et pour un joueur qui rejoint."""
+
+    def build(self, game_json):
+        return Session(
+            user=None, name="Waterloo", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=game_json,
+        )
+
+    def two_tokens(self, session_info):
+        session_info["game_json"]["movable"].append({
+            "kind": "token", "id": "t2", "x": 50, "y": 60,
+            "front_src": "front.png", "back_src": "back.png",
+            "width": 32, "height": 32,
+        })
+        return self.build(session_info["game_json"])
+
+    def ids(self, session):
+        return [component.id for component in session.components_lists["movable"]]
+
+    def test_a_released_token_goes_last(self, session_info):
+        session = self.two_tokens(session_info)
+
+        session.bring_to_front(session.components_dict["t1"])
+
+        assert self.ids(session) == ["t2", "t1"]
+
+    def test_a_token_already_last_is_left_alone(self, session_info):
+        session = self.two_tokens(session_info)
+
+        session.bring_to_front(session.components_dict["t2"])
+
+        assert self.ids(session) == ["t1", "t2"]
+
+    def test_a_non_movable_component_is_ignored(self, session_info):
+        session = self.two_tokens(session_info)
+
+        session.bring_to_front(session.components_dict["b1"])
+
+        assert self.ids(session) == ["t1", "t2"]
+
+    def test_the_new_order_survives_a_save_and_reload(self, session_info):
+        session = self.two_tokens(session_info)
+        session.bring_to_front(session.components_dict["t1"])
+
+        reloaded = self.build(session.game_json_state())
+
+        assert self.ids(reloaded) == ["t2", "t1"]
+
+
 class TestSavedPositionsAreIntegers:
     """The client divides by the zoom, so positions are floats. Only the saved
     state is rounded: the board keeps sub-pixel precision while dragging."""

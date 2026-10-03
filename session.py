@@ -308,6 +308,20 @@ class Session:
     def get_component(self, component_id):
         return self.components_dict.get(component_id, False)
 
+    def bring_to_front(self, component):
+        """
+        Un pion relâché repasse en fin de la liste des déplaçables. C'est l'ordre
+        de cette liste que le client dessine : le pion se retrouve ainsi
+        au-dessus de la pile qu'il vient de rejoindre, et l'ordre survit à une
+        sauvegarde / reprise.
+        :return: None
+        """
+        movable = self.components_lists['movable']
+        for index, candidate in enumerate(movable):
+            if candidate is component:
+                movable.append(movable.pop(index))
+                return
+
     def fix_positions(self):
         """
         Remet le rectangle vert sur tous les jetons repositionnables.
