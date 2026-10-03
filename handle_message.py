@@ -205,10 +205,15 @@ def resume_session(self, logger, message):
         return
 
     session_key = message["session_key"]
+    # le code sert de piste a la reconstruction : la session peut avoir ete
+    # videe et retiree de la memoire quand la page de jeu se reconnecte
+    session_code = message.get("session_code")
     user.name = message.get("nickname") or user.name
     role = message.get("role", "player")
 
-    success, error = yield self.factory.lobby.resume_session(session_key, user, role)
+    success, error = yield self.factory.lobby.resume_session(
+        session_key, user, role, session_code
+    )
 
     if not success:
         self.send_error(error, f"Unable to resume session {session_key}")

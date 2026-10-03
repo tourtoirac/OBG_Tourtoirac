@@ -59,10 +59,21 @@ class FakeChabanas(Chabanas):
             return self._fired(False, with_status)
         if path == "/session/create":
             return self._fired({"session_code": self.info["code"]}, with_status)
-        if path in ("/session/get", "/session/join"):
-            if path == "/session/join" and self.join_status != 200:
+        if path == "/session/get":
+            # seule la session connue repond : un code inconnu renvoie False,
+            # comme un 404 de Chabanas
+            if payload.get("session_code") != self.info["code"]:
+                return self._fired(False, with_status)
+            return self._fired({"session": self.info}, with_status)
+        if path == "/session/join":
+            if self.join_status != 200:
                 return defer.succeed((self.join_status, False))
             return self._fired({"session": self.info}, with_status)
+        if path == "/session/update":
+            # comme Chabanas : la situation stockee remplace le game_json, si
+            # bien qu'une session reconstruite retrouve les positions d'avant
+            self.info["game_json"] = payload["game_json"]
+            return self._fired(True, with_status)
         if path == "/session/list":
             return self._fired({"sessions": {}}, with_status)
         if path == "/game/list":
@@ -481,6 +492,110 @@ class TestStoreStateWhenEmpty:
         lobby.delete_user(host)  # must not raise
 
         assert host.protocol not in lobby.users
+
+
+class TestResumeAfterTheLobbyIsLeft:
+    """
+    Passer du lobby au jeu ferme la connexion du lobby : la session se vide et
+    sort de la memoire avant que la page de jeu ne la revendique. resume_session
+    doit alors la reconstruire depuis l'etat stocke dans Chabanas, sinon le
+    lancement echoue avec "session_not_found".
+    """
+
+    def test_rebuilds_a_purged_session_from_stored_state(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.delete_user(host)  # dernier participant : la session est videe
+        assert session_info["key"] not in lobby.sessions
+
+        resumer = connect(lobby, "alice")
+        success, error = sync(
+            lobby.resume_session(
+                session_info["key"], resumer, "player", session_info["code"]
+            )
+        )
+
+        assert success is True
+        assert error is None
+        assert resumer.session is not None
+        assert lobby.sessions[session_info["key"]] is resumer.session
+        assert [u.name for u in resumer.session.players] == ["alice"]
+
+    def test_a_rebuilt_session_keeps_the_stored_position(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        token = host.session.components_dict["t1"]
+        token.acquire(host)
+        token.place(400, 500, host)
+        lobby.delete_user(host)
+
+        resumer = connect(lobby, "alice")
+        sync(
+            lobby.resume_session(
+                session_info["key"], resumer, "player", session_info["code"]
+            )
+        )
+
+        rebuilt = resumer.session.components_dict["t1"]
+        assert (rebuilt.x, rebuilt.y) == (400, 500)
+
+    def test_a_missing_code_cannot_rebuild(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.delete_user(host)
+
+        resumer = connect(lobby, "alice")
+        success, error = sync(
+            lobby.resume_session(session_info["key"], resumer, "player")
+        )
+
+        assert success is False
+        assert error == "session_not_found"
+
+    def test_a_code_pointing_to_another_session_is_refused(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.delete_user(host)
+
+        resumer = connect(lobby, "alice")
+        success, error = sync(
+            lobby.resume_session(session_info["key"], resumer, "player", "AUTRECODE")
+        )
+
+        assert success is False
+        assert error == "session_not_found"
+
+    def test_a_live_session_is_resumed_without_reloading(self, lobby, sync, session_info):
+        """Une session encore en memoire garde son etat vivant : on ne la
+        remplace pas par le game_json stocke dans Chabanas."""
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        token = host.session.components_dict["t1"]
+        token.acquire(host)
+        token.place(400, 500, host)
+
+        resumer = connect(lobby, "alice")
+        success, _ = sync(
+            lobby.resume_session(
+                session_info["key"], resumer, "player", session_info["code"]
+            )
+        )
+
+        assert success is True
+        assert resumer.session is host.session
+        assert (token.x, token.y) == (400, 500)
+
+    def test_a_late_store_does_not_drop_a_resumed_session(self, lobby, sync, session_info):
+        """
+        Le stockage de l'etat est asynchrone : s'il se termine apres la reprise,
+        il ne doit pas emporter la session qui vient d'etre repeuplee.
+        """
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        lobby._remove_session_if_still_empty(host.session)
+
+        assert lobby.sessions[host.session.key] is host.session
 
 
 class TestSessionStateReload:

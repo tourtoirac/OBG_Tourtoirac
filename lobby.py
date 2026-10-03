@@ -140,15 +140,29 @@ class Lobby:
         self._notify_lobby_users("join", session, user)
         return True, None
 
-    def resume_session(self, session_key: str, user: User, role: str = "player"):
+    @defer.inlineCallbacks
+    def resume_session(
+            self,
+            session_key: str,
+            user: User,
+            role: str = "player",
+            session_code: str | None = None
+    ):
         """
         Rebinds a freshly connected user to a session it already belonged to from
         another page. The lobby and the game are two distinct documents, so the
         game page opens its own WebSocket and gets a brand new User with no
         session attached. It has to claim the session again by key, otherwise
         acquire/release/move are all rejected with "no_session".
+
+        Le passage lobby -> jeu ferme la connexion du lobby, ce qui vide la
+        session et la retire de la memoire (son etat est stocke dans Chabanas).
+        La page de jeu se connecte juste apres : si la session n'est plus la, on
+        la reconstruit depuis l'etat stocke pour que le lancement aboutisse.
         """
         session = self.sessions.get(session_key)
+        if session is None:
+            session = yield self._reload_session(session_key, session_code)
         if session is None:
             return False, "session_not_found"
 
@@ -180,6 +194,30 @@ class Lobby:
         self._notify_lobby_users("join", session, user)
         return True, None
 
+    @defer.inlineCallbacks
+    def _reload_session(self, session_key: str, session_code: str | None):
+        """
+        Reconstruit une session videe puis retiree de la memoire, a partir de la
+        situation que Chabanas a stockee quand son dernier participant est parti.
+        La cle est le secret qui prouve que l'appelant etait dans la session ; le
+        code n'est qu'une piste de recherche, et les deux doivent designer la
+        meme session.
+        :return: la Session reconstruite, ou None si on ne la retrouve pas
+        """
+        if not session_code:
+            return None
+        session_info = yield self.chabanas.get_session_info(session_code)
+        if not session_info or session_info.get("key") != session_key:
+            return None
+        session = self._build_session(session_info)
+        self.add_session(session)
+        self.logger.info(
+            f"[RESUME] Session {session_key} rebuilt from Chabanas stored state"
+        )
+        # add_session ne remplace pas une session deja presente : deux reprises
+        # concurrentes doivent partager la meme instance, pas en garder chacune
+        # une copie dont une seule finirait dans le lobby
+        return self.sessions.get(session_key)
 
     def _notify_lobby_users(self, event: str, session: Session, user: User = None):
         """
@@ -285,12 +323,23 @@ class Lobby:
             f"({len(state['movable'])} movable components)"
         )
         deferred = self.chabanas.update_session_state(session.key, state)
-        deferred.addCallback(lambda _: self.remove_session(session))
+        deferred.addCallback(lambda _: self._remove_session_if_still_empty(session))
         deferred.addErrback(
             self.chabanas._log_failure,
             f"[LOBBY] Storing the state of session {session.key}"
         )
-        deferred.addErrback(lambda _: self.remove_session(session))
+        deferred.addErrback(lambda _: self._remove_session_if_still_empty(session))
+
+    def _remove_session_if_still_empty(self, session: Session):
+        """
+        Le stockage de l'etat est asynchrone : la page de jeu peut reprendre la
+        session (elle se reconnecte juste apres avoir quitte le lobby) avant
+        qu'il ne se termine. On ne retire donc la session que si elle est encore
+        vide, sinon on emporterait la partie qui vient d'etre reprise.
+        """
+        if session.players or session.watchers:
+            return
+        self.remove_session(session)
 
     def delete_user(self, user: User):
         if user is None:
