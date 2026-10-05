@@ -28,7 +28,7 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, orientable=False, orientation=0, side=None, origin=None):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None):
         super().__init__(component_id)
         self.kind = 'token'
         self.x = x
@@ -58,13 +58,36 @@ class Token (Component):
         # qu'un absent.
         self.orientable = orientable is True
         # emplacement initial, celui du jeu : y revenir rend le rectangle vert.
-        # initial/border sont fournis quand la session est reprise apres une sauvegarde.
+        # initial/in_place sont fournis quand la session est reprise apres une
+        # sauvegarde.
         if initial is None:
             initial = (x, y)
         self.initial_x = initial[0]
         self.initial_y = initial[1]
-        # un jeton non repositionnable n'affiche jamais le rectangle vert
-        self.border = move_border if border is None else (border and move_border)
+        # origin_x / origin_y : ou se dessine le fantome "transparent". C'est la
+        # place que le jeu a donnee au pion a son installation, et rien d'autre ne
+        # la deplace : ni le setup d'un jeu, ni "Fixe la position", ni une reprise
+        # de session. A l'installation elle vaut initial_x/initial_y, puis elle s'en
+        # ecarte des que la partie bouge : le fantome est un repere du plateau, la
+        # case de depart est ou revient le pion. Sans fantome, ces deux champs
+        # valent None : ils ne decrivent rien.
+        if origin == "transparent":
+            self.origin_x = origin_x if origin_x is not None else x
+            self.origin_y = origin_y if origin_y is not None else y
+        else:
+            self.origin_x = None
+            self.origin_y = None
+        # border : le jeu demande-t-il une ombre sous le pion ? Ce n'est qu'un
+        # rendu, fige pour toute la partie : un pion deplace garde son ombre.
+        # Absent d'un game_json de jeu, il n'y a pas d'ombre.
+        self.border = border is True
+        # in_place : le pion est-il sur sa case de depart ? C'est ce que montre
+        # le rectangle vert, et lui disparait au premier deplacement, jusqu'au
+        # prochain "fixe la position". Distinct de border, qui ne bouge jamais.
+        # Un pion non repositionnable n'affiche jamais le rectangle vert.
+        if in_place is None:
+            in_place = move_border
+        self.in_place = bool(in_place) and move_border
 
     def rotatable(self) -> bool:
         return self.orientable
@@ -87,20 +110,23 @@ class Token (Component):
 
     def near_initial_position(self, x, y) -> bool:
         """
-        Un jeton est considéré comme posé à sa case de départ s'il est à moins
+Un jeton est considéré comme posé à sa case de départ s'il est à moins
         de MOVE_THRESHOLD pixels d'elle.
 
         Un pion dont l'origine est "transparent" affiche un fantome sur sa case
-        de départ : le lâcher sur cette image le ramène chez lui, même si le
-        pointeur vise un coin du fantome plutôt que son centre.
+        d'origine : le lâcher sur cette image le ramène chez lui, même si le
+        pointeur vise un coin du fantôme plutôt que son centre. Le fantome reste
+        sur sa case d'origine pendant que le setup et "Fixe la position"
+        déplacent la case de retour : c'est le repère du plateau qui bouge, pas
+        le pion.
         """
         dx = x - self.initial_x
         dy = y - self.initial_y
         if dx * dx + dy * dy <= MOVE_THRESHOLD * MOVE_THRESHOLD:
             return True
-        if self.origin == "transparent":
+        if self.origin_x is not None and self.origin_y is not None:
             # les deux rectangles se recouvrent : le pion est posé sur l'image
-            return abs(dx) < self.width and abs(dy) < self.height
+            return abs(x - self.origin_x) < self.width and abs(y - self.origin_y) < self.height
         return False
 
     def acquire(self, user: User):
@@ -127,10 +153,21 @@ class Token (Component):
         Retourne le jeton, face avant puis face arriere. Un jeton sans image de
         dos garde sa face plutot que de pointer vers une image absente.
         """
+        self.set_side('back' if self.side == 'front' else 'front')
+
+    def set_side(self, side: str) -> bool:
+        """
+        Pose la face affichee du jeton sans le retourner : c'est une position de
+        depart, comme le setup d'un jeu, pas un coup de partie. Un jeton sans
+        image de dos garde sa face, faute d'image a montrer.
+        :param side: "front" ou "back"
+        :return: True quand la face a pu etre posee
+        """
         if not self.flippable():
-            return
-        self.side = 'back' if self.side == 'front' else 'front'
+            return False
+        self.side = 'back' if side == 'back' else 'front'
         self.src = self.image_src[self.side]
+        return True
 
     def move(self, x, y, user: User):
         if self.acquired_by == user:
@@ -138,7 +175,7 @@ class Token (Component):
             self.y = y
             self.coordinates = (self.x, self.y)
             # un jeton deplace perd son rectangle jusqu'au prochain "fixe la position"
-            self.border = False
+            self.in_place = False
 
     def place(self, x, y, user: User):
         """
@@ -154,9 +191,9 @@ class Token (Component):
             return False
         if self.move_border and self.near_initial_position(x, y):
             x, y = self.initial_x, self.initial_y
-            self.border = True
+            self.in_place = True
         else:
-            self.border = False
+            self.in_place = False
         self.x = x
         self.y = y
         self.coordinates = (self.x, self.y)
@@ -166,10 +203,13 @@ class Token (Component):
         """
         La position courante devient la nouvelle case de départ du jeton, qui
         recupere son rectangle vert s'il est repositionnable.
+
+        Le fantome "transparent" ne bouge pas : cette action dit ou revient le
+        pion, pas ou se trouve le repere que le jeu a pose sur son plateau.
         """
         self.initial_x = self.x
         self.initial_y = self.y
-        self.border = self.move_border
+        self.in_place = self.move_border
 
     def release(self, user: User):
         if self.acquired_by != user:
@@ -193,7 +233,12 @@ class Token (Component):
             "orientable": self.orientable,
             "move_border": self.move_border,
             "border": self.border,
+            "in_place": self.in_place,
             "initial_x": self.initial_x,
             "initial_y": self.initial_y,
-            "origin": self.origin
+            "origin": self.origin,
+            # ou le fantome est pose. Il ne bouge jamais : ces deux champs sont la
+            # seule chose qui survive telle quelle a une sauvegarde de session
+            "origin_x": self.origin_x,
+            "origin_y": self.origin_y
         }

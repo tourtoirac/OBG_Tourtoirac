@@ -11,7 +11,7 @@ from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, list_game, acquire, release, move, roll, rotate, flip, fix_positions
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, list_game, acquire, release, move, roll, rotate, flip, fix_positions, apply_setup, increment, decrement
 from lobby import Lobby
 from user import User
 
@@ -97,10 +97,16 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 roll(self, self.factory.lobby.logger, message)
             case "rotate": # a player turns an orientable token, everyone sees the new angle
                 rotate(self, self.factory.lobby.logger, message)
+            case "increment": # a player raises a counter, everyone sees the new value
+                increment(self, self.factory.lobby.logger, message)
+            case "decrement": # a player lowers a counter, everyone sees the new value
+                decrement(self, self.factory.lobby.logger, message)
             case "flip": # a player turns a counter over, everyone sees the new face
                 flip(self, self.factory.lobby.logger, message)
             case "fix_positions": # players restore the green border on the counters
                 result = fix_positions(self, self.factory.lobby.logger, message)
+            case "apply_setup": # the game setup lands once every component is placed
+                result = apply_setup(self, self.factory.lobby.logger, message)
             case _:
                 self.send_error(
                     "unknown_action",

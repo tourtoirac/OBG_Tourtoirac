@@ -485,6 +485,60 @@ def rotate(self, logger, message):
     })
 
 
+# le + et le - d'un compteur : meme cliquable, deux sens. Le client ne fait que
+# dire lequel des deux il a vise, c'est le serveur qui compte de combien la
+# valeur bouge.
+COUNTER_ACTIONS = {
+    "increment": "incrementable",
+    "decrement": "decrementable",
+}
+
+
+def change_counter_value(self, logger, message, action: str):
+    """
+    Fait monter ou baisser la valeur d'un compteur d'un cran, puis la diffuse a
+    tous les ecrans. Le serveur fait autorite : le client ne peut pas choisir la
+    nouvelle valeur, seulement demander le sens du changement.
+    """
+    logger.debug(f"Process {action} message")
+    user, component, ready = resolve_component_action(
+        self, message, action, ["component_id"]
+    )
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    # seuls les compteurs acceptent ce changement : un plateau ou un pion
+    # renvoyes ici ne doivent pas voir leur valeur bouger par erreur
+    if not getattr(component, COUNTER_ACTIONS[action])():
+        self.send_error(
+            f"component_not_{action}able",
+            f"Component {component_id} cannot be {action}ed"
+        )
+        return
+
+    if action == "increment":
+        value = component.increase_value()
+    else:
+        value = component.decrease_value()
+
+    # la nouvelle valeur est diffusee a tous, joueurs comme spectateurs : chaque
+    # ecran affiche le meme compteur, avec le meme nombre
+    user.session.send({
+        "event": "counter_value",
+        "component_id": component_id,
+        "value": value,
+    })
+
+
+def increment(self, logger, message):
+    change_counter_value(self, logger, message, "increment")
+
+
+def decrement(self, logger, message):
+    change_counter_value(self, logger, message, "decrement")
+
+
 def flip(self, logger, message):
     """
     Retourne un pion. Le client ne fait que le demander : c'est le serveur qui
@@ -556,5 +610,48 @@ def fix_positions(self, logger, message):
     logger.debug(f"[FIX] {user.name} fixed {len(components)} counters")
     user.session.send({
         "event": "fix_positions",
+        "components": components,
+    })
+
+
+def apply_setup(self, logger, message):
+    """
+    Le client annonce que tous les composants sont charges : c'est le moment que
+    le jeu attendait pour placer sa mise en place. Le serveur applique alors son
+    setup, qu'il detient seul, puis diffuse le resultat a tous les ecrans. Comme
+    pour "Fixe la position", le client ne choisit aucune position : il demande
+    qu'on applique celles du jeu.
+    """
+    logger.debug("Process apply_setup message")
+    user = self.factory.lobby.get_user(self)
+
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            "The apply_setup action requires an active session"
+        )
+        return
+
+    if user.role != "player":
+        # un spectateur ne modifie pas la partie : c'est le role que le serveur
+        # a sous les yeux qui compte, pas celui de celui qui regarde
+        self.send_error(
+            "watcher_not_allowed",
+            "Only players can install the game"
+        )
+        return
+
+    if not user.session.setup:
+        self.send_error("no_setup", "This game asks for no setup")
+        return
+
+    components = user.session.apply_setup()
+    logger.debug(f"[SETUP] {user.name} installed {len(components)} components")
+    user.session.send({
+        "event": "setup",
         "components": components,
     })

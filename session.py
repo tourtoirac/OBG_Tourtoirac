@@ -2,6 +2,7 @@ from unittest import loader
 
 from user import User
 from Components.board import Board
+from Components.counter import Counter, DEFAULT_COUNTER_COLOR
 from Components.dice import Dice
 from Components.token import Token
 
@@ -9,7 +10,58 @@ import uuid
 
 
 # champs de position arrondis dans l'état sauvegardé
-POSITION_FIELDS = ('x', 'y', 'initial_x', 'initial_y')
+POSITION_FIELDS = ('x', 'y', 'initial_x', 'initial_y', 'origin_x', 'origin_y')
+
+# champs de position qu'une entrée de setup peut porter
+SETUP_POSITION_FIELDS = ('x', 'y')
+
+# les deux faces qu'un setup peut demander pour un composant qui se retourne
+SETUP_SIDES = ('front', 'back')
+
+
+def read_coordinate(value):
+    """
+    Lit une coordonnee de setup. Le jeu ecrit "x": 100, mais un game_json ecrit
+    a la main peut mettre une chaine, un booleen, ou oublier le champ : la
+    modification est alors ignoree, plutot que de deplacer le composant sur 0.
+    :param value: le champ x ou y tel que lu dans le game_json
+    :return: un entier, ou None quand la coordonnee ne se lit pas
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def read_setup(setup):
+    """
+    Lit le setup d'un jeu : la liste des modifications a apporter apres
+    l'installation de la partie. Une entree mal ecrite est plutot ignoree que
+    fatale : un setup incomplet vaut mieux qu'une partie qui ne demarre pas.
+    :param setup: le champ "setup" tel que lu dans le game_json
+    :return: une liste d'entrees, chacune pourvue au moins d'un component_id
+    """
+    if not isinstance(setup, list):
+        return []
+
+    entries = []
+    for entry in setup:
+        if not isinstance(entry, dict):
+            continue
+        component_id = entry.get('component_id')
+        if not isinstance(component_id, str) or not component_id:
+            continue
+
+        cleaned = {'component_id': component_id}
+        for field in SETUP_POSITION_FIELDS:
+            coordinate = read_coordinate(entry.get(field))
+            if coordinate is not None:
+                cleaned[field] = coordinate
+        # une face qui n'existe pas est une faute de saisie du jeu : le composant
+        # reste sur celle qu'il montre plutot que de disparaitre
+        if entry.get('side') in SETUP_SIDES:
+            cleaned['side'] = entry['side']
+        entries.append(cleaned)
+    return entries
 
 
 class Session:
@@ -48,6 +100,15 @@ class Session:
         # "Fixe la position" ; null demande de le masquer.
         options = game_json.get("options")
         self.options = dict(options) if isinstance(options, dict) else {}
+        # setup : les modifications que le jeu demande d'apporter apres
+        # l'installation de la partie, une fois tous les composants charges. Le
+        # client ne fait que demander qu'on les applique : les positions
+        # restent ici, seul juge de la partie.
+        self.setup = read_setup(game_json.get('setup'))
+        # le setup a-t-il deja ete applique ? Une fois que c'est fait, il ne doit
+        # plus ete renvoye : un joueur qui rejoint apres coup ne replacerait pas
+        # les pions au milieu de la partie.
+        self.setup_done = False
         self.empty_since = None
         # Chabanas est seul juge de l'ownership : le pseudo du createur arrive
         # dans la description de session. Aucun client ne peut s'octroyer ce
@@ -71,14 +132,41 @@ class Session:
                             component['y'],
                             component['src'],
                             component['width'],
-                            component['height']
+                            component['height'],
+                            # flippable : absent d'un game_json de jeu, present
+                            # seulement si le jeu autorise le retournement
+                            component.get('flippable', False)
+                        )
+                        self.components_lists["fixed"].append(game_component)
+                        self.components_dict[component['id']] = game_component
+                    case 'counter':
+                        # un compteur est fige comme un plateau, mais cliquable :
+                        # le client dessine son fond et ses deux zones + et -
+                        game_component = Counter(
+                            component['id'],
+                            component['x'],
+                            component['y'],
+                            component['width'],
+                            component['height'],
+                            # color et value : absents d'un jeu qui les oublie,
+                            # le compteur s'affiche alors sans fond, a zero
+                            component.get('color', DEFAULT_COUNTER_COLOR),
+                            component.get('value', 0),
+                            # font_color : absent, le chiffre prend une couleur
+                            # lisible sur le fond
+                            component.get('font_color'),
+                            # min et max : absents ou null, la valeur est libre de
+                            # ce cote ; presents, le serveur refuse de sortir de la
+                            # plage et le client grise le signe devenu impossible
+                            component.get('min'),
+                            component.get('max')
                         )
                         self.components_lists["fixed"].append(game_component)
                         self.components_dict[component['id']] = game_component
                     case 'dice':
                         self.add_dice(component, list_name)
                     case 'token' if list_name == 'movable':
-                        # initial/border/orientation sont absents d'un game_json de
+                        # initial/in_place/orientation sont absents d'un game_json de
                         # jeu : ils ne sont presents que si la session a ete reprise
                         # apres une sauvegarde de la position courante.
                         initial = None
@@ -94,7 +182,13 @@ class Session:
                             component['height'],
                             component.get('move_border', True),
                             initial,
+                            # border : le jeu demande-t-il une ombre sous ce
+                            # pion ? Rendu fige, independant des deplacements
                             component.get('border'),
+                            # in_place : le rectangle vert, tel que la
+                            # sauvegarde l'a laisse ; absent, un pion
+                            # repositionnable commence sur sa case de depart
+                            component.get('in_place'),
                             # orientable : le jeu autorise-t-il les zones de rotation
                             component.get('orientable', False),
                             # orientation : l'angle atteint avant la sauvegarde
@@ -104,8 +198,14 @@ class Session:
                             # pion commence alors sur sa face
                             component.get('side'),
                             # origin : "transparent" fait afficher le fantome du
-                            # pion sur sa case de depart
-                            component.get('origin')
+                            # pion sur sa case d'origine
+                            component.get('origin'),
+                            # origin_x / origin_y : ou ce fantome est pose. Le jeu
+                            # ne les donne pas, ils ne sont la que sur une session
+                            # reprise apres une sauvegarde ; le Token retombe alors
+                            # sur le x/y qu'il avait a l'installation du jeu
+                            component.get('origin_x'),
+                            component.get('origin_y')
                         )
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component
@@ -146,6 +246,17 @@ class Session:
         :return: dict
         """
         state = dict(self.game_json)
+        # le setup ne sort de l'etat stocke qu'une fois applique : les positions
+        # qu'il a produites sont alors deja dans "fixed" et "movable", et le
+        # recopier ferait replacer les pions a chaque reprise de session.
+        #
+        # Tant qu'il n'a pas ete applique, il doit au contraire y rester. L'etat
+        # est stocke des que le dernier joueur quitte la page, donc avant que la
+        # page de jeu ne soit chargee : une session reconstruite sans son setup
+        # ne l'installerait jamais, et la partie demarrerait hors de sa mise en
+        # place. "setup absent" veut donc dire "setup deja fait".
+        if self.setup_done:
+            state.pop('setup', None)
         dice_by_origin = {'fixed': [], 'movable': [], 'dice': []}
         for component in self.components_lists['dice']:
             dice_by_origin[component.origin_list].append(
@@ -205,6 +316,9 @@ class Session:
             "options": self.options,
             "players": f"{len(self.players)}/{self.max_players}",
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
+            # le setup en attente que le client applique : une fois la partie
+            # installee, la liste est vide et personne ne rejoue la mise en place
+            "setup": self.pending_setup(),
             "components": {
                 "fixed" : [component.return_json() for component in self.components_lists["fixed"]],
                 "movable": [component.return_json() for component in self.components_lists['movable']],
@@ -334,3 +448,64 @@ class Session:
             component.fix_position()
             fixed.append(component.return_json())
         return fixed
+
+    def pending_setup(self) -> list:
+        """
+        Le setup tant qu'il n'a pas ete applique. La liste redevient vide une
+        fois la partie installee : un joueur qui rejoint entre-temps ne doit pas
+        replacer les pions au milieu du jeu.
+        :return: la liste des modifications encore a faire
+        """
+        return [] if self.setup_done else self.setup
+
+    def apply_setup(self) -> list:
+        """
+        Applique les modifications que le jeu demande apres l'installation de la
+        partie, puis renvoie les composants touches : chaque ecran, joueur comme
+        spectateur, applique la meme chose.
+
+        Les positions du setup sont absolues, jamais relatives : reappliquer le
+        setup ne bouge donc rien, ce qui laisse deux joueurs le demander sans que
+        la partie bouge deux fois.
+
+        :return: la liste des composants modifies
+        """
+        movable_ids = {component.id for component in self.components_lists['movable']}
+        applied = {}
+
+        for entry in self.setup:
+            component = self.components_dict.get(entry['component_id'])
+            if component is None:
+                # un setup qui parle d'un composant que le jeu ne declare pas
+                # est une faute de saisie : on l'ignore, la partie demarre
+                continue
+
+            moved = False
+            for field in SETUP_POSITION_FIELDS:
+                if field in entry:
+                    setattr(component, field, entry[field])
+                    moved = True
+
+            if moved:
+                component.coordinates = (component.x, component.y)
+                # la case de depart d'un pion devient celle du setup : c'est elle
+                # que montre le rectangle vert et que vise le retour du pion. Son
+                # eventual fantome, lui, reste sur la case d'origine du game_json :
+                # le setup installe le jeu, il ne deplace pas les reperes que le
+                # jeu a poses sur son plateau
+                if component.id in movable_ids:
+                    component.fix_position()
+
+            # un composant qui ne se retourne pas garde la face qu'il montre :
+            # set_side refuse alors le changement plutot que de pointer vers une
+            # image absente
+            if 'side' in entry:
+                component.set_side(entry['side'])
+
+            # un composant peut figurer dans deux entrees, une qui le deplace et
+            # une qui le retourne : on ne l'annonce qu'une fois, dans son etat
+            # final
+            applied[component.id] = component.return_json()
+
+        self.setup_done = True
+        return list(applied.values())

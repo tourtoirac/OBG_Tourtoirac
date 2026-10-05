@@ -2,7 +2,7 @@ from Components.component import Component
 
 class Board(Component):
     # boards are immovable images
-    def __init__(self, component_id, x, y, src, width, height):
+    def __init__(self, component_id, x, y, src, width, height, flippable = False):
         super().__init__(component_id)
         self.kind = 'board'
         self.x = x
@@ -10,6 +10,10 @@ class Board(Component):
         self.src = src
         self.height = height
         self.width = width
+        # flippable : le jeu autorise-t-il le retournement local de ce plateau.
+        # Le nom differe de flippable() (une face n'a pas de dos) : le plateau
+        # est visible de deux cotes selon le joueur, pas retourne pour tous.
+        self.view_flippable = flippable
         self.coordinates = (x, y)
 
     def return_json(self, sat_list = None) -> dict:
@@ -23,5 +27,6 @@ class Board(Component):
             "src": self.src,
             "height": self.height,
             "width": self.width,
+            "flippable": self.view_flippable,
             "sat_list": sat_list
         }

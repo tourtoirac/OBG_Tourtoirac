@@ -58,6 +58,16 @@ class Component:
         """
         pass
 
+    def set_side(self, side: str) -> bool:
+        """
+        Whether this component can be shown on that face. Only a token whose
+        game_json gives it a back_src can: a board, a dice or a counter has one
+        single face and stays on it.
+        :param side: "front" or "back"
+        :return: True when the face was actually set
+        """
+        return False
+
     def move(self, x: int, y: int, user: User):
         """
         placeholder function
@@ -123,6 +133,22 @@ class Component:
         :return: the new orientation, in degrees
         """
         return 0
+
+    def incrementable(self) -> bool:
+        """
+        Whether this component can count up. Only a counter does: nothing else
+        displays a value a player may raise.
+        :return: True when the component may count up
+        """
+        return False
+
+    def decrementable(self) -> bool:
+        """
+        Whether this component can count down. A counter can, the other
+        components have no value to lower.
+        :return: True when the component may count down
+        """
+        return False
 
     def shuffle(self, container_name: str):
         """

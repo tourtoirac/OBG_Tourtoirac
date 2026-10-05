@@ -454,7 +454,7 @@ class TestStoreStateWhenEmpty:
         stored = {c["id"]: c for c in payload["game_json"]["movable"]}
         assert payload["key"] == host.session.key
         assert stored["t1"]["x"] == 400 and stored["t1"]["y"] == 500
-        assert stored["t1"]["border"] is False
+        assert stored["t1"]["in_place"] is False
 
     def test_state_is_not_stored_twice_while_nobody_comes_back(self, lobby, sync):
         host = connect(lobby, "alice")
@@ -622,7 +622,7 @@ class TestSessionStateReload:
 
         reloaded = again.components_dict["t1"]
         assert (reloaded.x, reloaded.y) == (400, 500)
-        assert reloaded.border is False
+        assert reloaded.in_place is False
 
     def test_the_initial_position_survives_a_reload(self, session_info):
         """A moved token must keep the board spot as its initial position,
@@ -647,22 +647,22 @@ class TestSessionStateReload:
         user = User(name="alice", protocol=None)
         token.acquire(user)
         assert token.place(400, 500, user) is True
-        assert token.border is False
+        assert token.in_place is False
         assert token.place(1, 2, user) is True
-        assert token.border is True
+        assert token.in_place is True
 
         again = self.build(first.game_json_state())
 
-        assert again.components_dict["t1"].border is True
+        assert again.components_dict["t1"].in_place is True
 
     def test_a_frozen_token_never_gets_a_border_from_a_reload(self, session_info):
         info = session_info["game_json"]
         info["movable"][0]["move_border"] = False
-        info["movable"][0]["border"] = True
+        info["movable"][0]["in_place"] = True
 
         reloaded = self.build(self.build(info).game_json_state())
 
-        assert reloaded.components_dict["t1"].border is False
+        assert reloaded.components_dict["t1"].in_place is False
 
     def test_the_game_limits_are_preserved(self, session_info):
         """Session.__init__ reads game_json['game'], so a stored state that lost
@@ -715,8 +715,8 @@ class TestFixPositionsMovesEveryStart:
 
         assert (first.initial_x, first.initial_y) == (400, 500)
         assert (second.initial_x, second.initial_y) == (410, 510)
-        assert first.border is True
-        assert second.border is True
+        assert first.in_place is True
+        assert second.in_place is True
         assert "t2" in session.components_dict, "les deux jetons sont bien présents"
 
     def test_the_stored_state_carries_the_new_start(self, session_info):
@@ -732,7 +732,7 @@ class TestFixPositionsMovesEveryStart:
 
         stored = {c["id"]: c for c in session.game_json_state()["movable"]}
         assert (stored["t1"]["initial_x"], stored["t1"]["initial_y"]) == (400, 500)
-        assert stored["t1"]["border"] is True
+        assert stored["t1"]["in_place"] is True
 
     def test_the_returned_components_describe_the_new_start(self, session_info):
         session = self.build(session_info["game_json"])
@@ -745,7 +745,7 @@ class TestFixPositionsMovesEveryStart:
 
         assert returned[0]["initial_x"] == 400
         assert returned[0]["initial_y"] == 500
-        assert returned[0]["border"] is True
+        assert returned[0]["in_place"] is True
 
 
 class TestConfigurableFixPositionsButton:
