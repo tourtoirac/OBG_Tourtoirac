@@ -57,6 +57,18 @@ class Lobby:
                 return player.get("nickname")
         return None
 
+    @staticmethod
+    def _seat_names(session_info: dict) -> list:
+        """
+        Les pseudos des sieges que Chabanas a enregistres, connectes ou non :
+        une partie commencee attend qu'ils soient tous la.
+        """
+        return [
+            player["nickname"]
+            for player in session_info.get("players") or []
+            if player.get("nickname")
+        ]
+
     def _build_session(self, session_info):
         return Session(
             user=None,
@@ -66,8 +78,28 @@ class Lobby:
             active=session_info["active"],
             variant=session_info["variant"],
             game_json=session_info['game_json'],
-            owner_nickname=self._owner_of(session_info)
+            owner_nickname=self._owner_of(session_info),
+            started=session_info.get("started", False),
+            player_names=self._seat_names(session_info)
         )
+
+    def _refresh_seats(self, session: Session, session_info: dict) -> None:
+        """
+        Une adhesion peut ajouter un siege, et le dernier siege pris demarre la
+        partie : la session en memoire reprend les deux depuis Chabanas.
+        """
+        session.refresh_seats(
+            session_info.get("started", False),
+            self._seat_names(session_info)
+        )
+
+    @staticmethod
+    def _send_status(session: Session) -> None:
+        """
+        Chaque ecran de la partie apprend si elle a commence et qui manque a la
+        table : c'est ce qui autorise ou non a prendre un pion.
+        """
+        session.send(session.return_status_json())
 
     def _refresh_owner(self, session: Session, session_info: dict) -> Session:
         """
@@ -120,6 +152,7 @@ class Lobby:
             return False, reason
 
         user.session = session
+        self._send_status(session)
         return True, None
 
     @defer.inlineCallbacks
@@ -154,6 +187,9 @@ class Lobby:
             # la session vit deja ici : son proprietaire peut ne pas etre connu
             # encore, la description fraiche de Chabanas permet de le retenir
             self._refresh_owner(session, session_info)
+            # ni le siege qui vient d'etre pris, ni le demarrage qu'il a pu
+            # declencher
+            self._refresh_seats(session, session_info)
             # la session vit deja ici : on garde son etat (jetons deplaces) et on
             # ignore le game_json renvoie par Chabanas, qui est celui du stockage
 
@@ -163,6 +199,7 @@ class Lobby:
 
         user.session = session
         self._notify_lobby_users("join", session, user)
+        self._send_status(session)
         return True, None
 
     @defer.inlineCallbacks
@@ -211,12 +248,20 @@ class Lobby:
         if role not in ("player", "watcher"):
             return False, "invalid_role"
 
+        # la reprise ne passe pas par Chabanas : c'est ici qu'une partie
+        # commencee refuse un joueur qui n'y a pas de siege. Sans liste de
+        # sieges, on ne sait pas qui en a un : on ne refuse personne.
+        if (role == "player" and session.started and session.player_names
+                and user.name not in session.player_names):
+            return False, "session_started"
+
         success, reason = session.add_user(user, role)
         if not success:
             return False, reason
 
         user.session = session
         self._notify_lobby_users("join", session, user)
+        self._send_status(session)
         return True, None
 
     @defer.inlineCallbacks
@@ -279,6 +324,29 @@ class Lobby:
             return game_list, None
         else:
             return False, "Unable to retrieve game information"
+
+    @defer.inlineCallbacks
+    def start_session(self, session: Session):
+        """
+        Demarre la partie a la demande de son proprietaire, avant que tous les
+        sieges ne soient pris. Chabanas l'enregistre d'abord : c'est lui qui refuse
+        ensuite tout nouveau joueur, et qui garde la valeur si la partie est
+        coupee puis reprise.
+        :return: (True, None) on success, (False, reason) otherwise
+        """
+        if session.closed:
+            return False, "session_closed"
+        if session.started:
+            return False, "session_already_started"
+        stored = yield self.chabanas.start_session(session.key)
+        if not stored:
+            return False, "session_start_not_stored"
+        session.started = True
+        self.logger.info(f"[SESSION] {session.key} started")
+        self._send_status(session)
+        # le lobby doit cesser de proposer cette partie aux nouveaux joueurs
+        self._notify_lobby_users("started", session)
+        return True, None
 
     @defer.inlineCallbacks
     def close_session(self, session: Session):
@@ -375,6 +443,7 @@ class Lobby:
                 if session is not None:
                     session.remove_user(user)
                     self._notify_lobby_users("leave", session, user)
+                    self._send_status(session)
                     self._save_state_if_empty(session)
                 else:
                     self.logger.warning(

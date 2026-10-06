@@ -75,6 +75,8 @@ class Session:
             variant: str,
             game_json: dict,
             owner_nickname: str | None = None,
+            started: bool = False,
+            player_names: list | None = None,
             ):
         self.key = key
         self.name = name
@@ -117,6 +119,14 @@ class Session:
         # une session close reste en memoire le temps que ses connexions se
         # ferment, mais elle n'accepte plus personne et ne se rejoins plus
         self.closed = False
+        # la partie a-t-elle commence ? Chabanas en est seul juge : il la
+        # demarre quand le dernier siege est pris, ou sur demande d'un joueur.
+        # Tant qu'elle n'a pas commence, personne ne prend de pion en main.
+        self.started = bool(started)
+        # les pseudos des sieges que Chabanas a enregistres pour cette partie,
+        # connectes ou non. Une partie commencee attend qu'ils soient tous la
+        # avant de laisser prendre un pion.
+        self.player_names = list(player_names or [])
         self.load_session_components()
 
     def load_session_components(self):
@@ -316,6 +326,8 @@ class Session:
             "options": self.options,
             "players": f"{len(self.players)}/{self.max_players}",
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
+            "started": self.started,
+            "missing_players": self.missing_players(),
             # le setup en attente que le client applique : une fois la partie
             # installee, la liste est vide et personne ne rejoue la mise en place
             "setup": self.pending_setup(),
@@ -326,6 +338,48 @@ class Session:
             }
         }
         return session_json
+
+    def refresh_seats(self, started: bool, player_names: list) -> None:
+        """
+        Reprend ce que Chabanas vient de dire de la session : les sieges
+        enregistres, et si la partie a commence. Une partie commencee ne
+        redevient jamais non commencee, meme sur une reponse en retard.
+        """
+        self.started = self.started or bool(started)
+        self.player_names = list(player_names)
+
+    def missing_players(self) -> list:
+        """
+        Les joueurs qui ont un siege dans la partie mais ne sont pas connectes
+        en tant que joueur.
+        :return: leurs pseudos, dans l'ordre des sieges
+        """
+        connected = {user.name for user in self.players}
+        return [name for name in self.player_names if name not in connected]
+
+    def acquire_refusal(self) -> str | None:
+        """
+        Peut-on prendre un pion en main ? Il faut que la partie ait commence et
+        que tous ses joueurs soient a la table.
+        :return: None si c'est permis, sinon le code d'erreur a renvoyer
+        """
+        if not self.started:
+            return "session_not_started"
+        if self.missing_players():
+            return "players_missing"
+        return None
+
+    def return_status_json(self) -> dict:
+        """
+        L'etat de la partie que chaque ecran affiche, et qui decide si l'on
+        peut prendre un pion : diffuse a chaque changement.
+        :return: dict
+        """
+        return {
+            "event": "session_status",
+            "started": self.started,
+            "missing_players": self.missing_players(),
+        }
 
     def is_owner(self, user: User) -> bool:
         """

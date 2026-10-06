@@ -74,6 +74,9 @@ SESSION_INFO = {
     "code": "CODE1",
     "active": True,
     "variant": "std",
+    # deja commencee, sans siege enregistre : les tests de composants peuvent
+    # prendre un pion. Le demarrage a ses propres tests (test_session_start.py)
+    "started": True,
     "game_json": {
         "game": {"max_players": 2, "max_watchers": 1},
         "fixed": [

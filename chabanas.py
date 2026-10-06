@@ -217,6 +217,19 @@ class Chabanas:
         return bool(response)
 
     @defer.inlineCallbacks
+    def start_session(self, session_key: str):
+        """
+        Marks a session as started: Chabanas then refuses any new player, and
+        keeps the value when the session is stored and resumed later on.
+        :return: True when Chabanas acknowledged the start
+        """
+        response = yield self._post_json("/session/update", {
+            "key": str(session_key),
+            "started": True,
+        })
+        return bool(response)
+
+    @defer.inlineCallbacks
     def archive_session(self, session_key: str):
         """
         Archives a session for good: it leaves the lobby and nobody can join it

@@ -93,7 +93,8 @@ JOIN_REFUSALS = {
     "access_key_incorrect": "Wrong access key, or that key is already used by this nickname",
     "watchers_not_allowed": "This game does not accept spectators",
     "watchers_full": "This game already has all its spectators",
-    "session_unavailable": "This game is full or locked",
+    "session_unavailable": "This game is full or already started",
+    "session_started": "This game has already started without you",
     "missing_field": "Missing information to join the game",
     "invalid_role": "Invalid role",
     "session_closed": "This game is closed",
@@ -109,6 +110,62 @@ CLOSE_REFUSALS = {
     "session_state_not_stored": "Unable to store the game before closing it",
     "session_not_archived": "Unable to archive the game",
 }
+
+
+# ce que repond le serveur quand le demarrage est refuse
+START_REFUSALS = {
+    "no_session": "You are not in a game",
+    "watcher_not_allowed": "Only players can start the game",
+    "not_session_owner": "Only the owner of the game can start it",
+    "session_closed": "This game is closed",
+    "session_already_started": "This game has already started",
+    "session_start_not_stored": "Unable to start the game",
+}
+
+
+# ce que repond le serveur quand un pion ne peut pas encore etre pris en main
+ACQUIRE_REFUSALS = {
+    "session_not_started": "The game has not started yet",
+    "players_missing": "Waiting for every player to come back",
+}
+
+
+@defer.inlineCallbacks
+def start_session(self, logger, message):
+    """
+    Demarre la partie avant que tous les sieges ne soient pris, au nom de son
+    proprietaire. Comme pour la cloture, l'owner est verifie ici et pas
+    seulement dans l'interface : masquer un bouton n'est pas une permission.
+    Une fois la partie demarree, plus aucun joueur ne peut la rejoindre, et les
+    pions deviennent prenables des que tous les joueurs sont a la table.
+    """
+    logger.debug("Process start_session message")
+    user = self.factory.lobby.get_user(self)
+    if user is None or user.session is None:
+        self.send_error("no_session", START_REFUSALS["no_session"])
+        return
+
+    session = self.factory.lobby.sessions.get(user.session.key)
+    if session is None:
+        self.send_error("no_session", START_REFUSALS["no_session"])
+        return
+
+    if user.role != "player":
+        self.send_error("watcher_not_allowed", START_REFUSALS["watcher_not_allowed"])
+        return
+
+    if not session.is_owner(user):
+        self.send_error("not_session_owner", START_REFUSALS["not_session_owner"])
+        return
+
+    success, error = yield self.factory.lobby.start_session(session)
+
+    if not success:
+        self.send_error(error, START_REFUSALS.get(error, "Unable to start the game"))
+        return
+
+    # la session a deja diffuse session_status a tout le monde
+    logger.debug(f"{user.name} started session {session.code}")
 
 
 @defer.inlineCallbacks
@@ -331,6 +388,17 @@ def acquire(self, logger, message):
         self, message, "acquire", ["component_id"]
     )
     if not ready:
+        return
+
+    # le serveur fait autorite : un client peut envoyer acquire meme quand son
+    # interface ne le propose pas
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
         return
 
     component_id = message["component_id"]

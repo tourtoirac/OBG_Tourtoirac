@@ -992,7 +992,9 @@ class TestLobbyNotifications:
         sync(lobby.join_session(session_info["code"], connect(lobby, "bob"), "", "player"))
 
         assert json.loads(watcher.protocol.sent[-1])["event"] == "session_players_changed"
-        assert json.loads(host.protocol.sent[-1])["event"] == "session_players_changed"
+        # l'hote est dans la session : il recoit aussi le nouvel etat de la partie
+        host_events = [json.loads(sent)["event"] for sent in host.protocol.sent]
+        assert "session_players_changed" in host_events
 
     def test_broadcast_reports_the_seat_count(self, lobby, sync, session_info):
         host = connect(lobby, "alice")
@@ -1144,7 +1146,8 @@ class TestShutdown:
 
         assert lobby.users == {}
         assert lobby.sessions == {}
-        assert b"server_shutdown" in first.protocol.sent[0]
+        # alice a deja recu l'etat de sa partie a la creation
+        assert b"server_shutdown" in first.protocol.sent[-1]
         assert b"server_shutdown" in second.protocol.sent[0]
         assert first.protocol.closed and second.protocol.closed
 
