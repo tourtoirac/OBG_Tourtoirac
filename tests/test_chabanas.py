@@ -263,3 +263,57 @@ class TestTimeout:
         assert started.wait(5)
         assert finished.wait(15), "le timeout n'a pas declenche"
         assert captured["value"] is False
+
+
+class FlakyBackend(resource.Resource):
+    """Answers 503 to the first `failures` requests, then behaves like Backend."""
+
+    isLeaf = True
+
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+        self.calls = 0
+
+    def render_POST(self, request):
+        self.calls += 1
+        if self.calls <= self.failures:
+            request.setResponseCode(503)
+            return b"{}"
+        return Backend().render_POST(request)
+
+
+class TestReadiness:
+    """Tourtoirac must not listen for players before Chabanas answers."""
+
+    def test_ready_when_chabanas_answers(self, chabanas, on_reactor):
+        assert on_reactor(chabanas.is_ready) is True
+
+    def test_not_ready_on_an_http_error(self, serve, on_reactor):
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = serve(FlakyBackend(failures=1))
+
+        assert on_reactor(instance.is_ready) is False
+
+    def test_not_ready_when_nothing_listens(self, on_reactor):
+        """A network failure resolves to False, not to a (status, body) tuple."""
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = "http://127.0.0.1:1"
+
+        assert on_reactor(instance.is_ready) is False
+
+    def test_waits_until_chabanas_answers(self, serve, on_reactor):
+        backend = FlakyBackend(failures=2)
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = serve(backend)
+
+        assert on_reactor(instance.wait_until_ready, 5, 0.05) is True
+        assert backend.calls == 3
+
+    def test_gives_up_after_max_retries(self, serve, on_reactor):
+        backend = FlakyBackend(failures=100)
+        instance = Chabanas(LOGGER, timeout=2.0)
+        instance.host_url = serve(backend)
+
+        assert on_reactor(instance.wait_until_ready, 3, 0.05) is False
+        assert backend.calls == 3

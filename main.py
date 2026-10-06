@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 
 from autobahn.twisted.websocket import (
     WebSocketServerProtocol,
@@ -22,6 +23,10 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# attente de Chabanas au demarrage : 30 tentatives espacees de 2 s
+CHABANAS_MAX_RETRIES = 30
+CHABANAS_RETRY_INTERVAL = 2.0
 
 class GameWebSocketProtocol(WebSocketServerProtocol):
     def onConnect(self, request):
@@ -168,12 +173,7 @@ def create_lobby(logger, chabanas):
     return lobby
 
 
-def main():
-    # Lobby creation
-    chabanas = Chabanas(logger)
-    lobby = create_lobby(logger, chabanas)
-    logger.info("[SERVER] Lobby created")
-
+def start_server(lobby):
     # WebSocket init
     factory = GameWebSocketFactory(
         "ws://0.0.0.0:9000",
@@ -197,7 +197,40 @@ def main():
     )
     logger.info("[SERVER] Shutdown handler registered")
 
+
+def main():
+    # Lobby creation
+    chabanas = Chabanas(logger)
+    lobby = create_lobby(logger, chabanas)
+    logger.info("[SERVER] Lobby created")
+
+    exit_code = 0
+
+    def on_chabanas_checked(ready):
+        nonlocal exit_code
+        if ready:
+            start_server(lobby)
+            return
+        # sans Chabanas aucune partie ne se liste, ne se cree ni ne se rejoint :
+        # on refuse de demarrer plutot que d'accepter des joueurs pour rien
+        logger.error(
+            f"[SERVER] Chabanas did not answer after {CHABANAS_MAX_RETRIES} "
+            f"attempts, giving up"
+        )
+        exit_code = 1
+        reactor.stop()
+
+    # le WebSocket n'ecoute qu'une fois Chabanas joignable
+    def wait_for_chabanas():
+        deferred = chabanas.wait_until_ready(CHABANAS_MAX_RETRIES, CHABANAS_RETRY_INTERVAL)
+        # une erreur inattendue ne doit pas laisser le processus en vie sans
+        # ecouter : elle vaut un Chabanas injoignable
+        deferred.addErrback(chabanas._log_failure, "[SERVER] Waiting for Chabanas")
+        deferred.addCallback(on_chabanas_checked)
+
+    reactor.callWhenRunning(wait_for_chabanas)
     reactor.run()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

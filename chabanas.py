@@ -1,6 +1,6 @@
 import json
 
-from twisted.internet import defer, reactor
+from twisted.internet import defer, reactor, task
 from twisted.web.client import Agent, readBody
 from twisted.web.http_headers import Headers
 from twisted.web.iweb import IBodyProducer
@@ -244,3 +244,42 @@ class Chabanas:
             self.logger.error("[CHABANAS] Response has no 'game_list' field")
             return False
         return game_list
+
+    @defer.inlineCallbacks
+    def is_ready(self):
+        """
+        Chabanas repond-il ? On interroge /game/list avec une liste vide : la
+        route ne touche a aucun jeu, mais elle traverse Django et la base, ce
+        qu'une simple connexion TCP ne prouverait pas.
+        :return: True quand Chabanas a repondu 200
+        """
+        result = yield self._post_json("/game/list", {
+            "game_name_list": [],
+        }, with_status=True)
+        # un echec reseau se resout en False, pas en (status, body)
+        if not isinstance(result, tuple):
+            return False
+        status, _ = result
+        return status == 200
+
+    @defer.inlineCallbacks
+    def wait_until_ready(self, max_retries: int, retry_interval: float):
+        """
+        Attend que Chabanas reponde avant que le serveur n'accepte des joueurs :
+        sans lui, aucune partie ne peut etre listee, creee ni rejointe.
+        :param max_retries: nombre de tentatives avant d'abandonner
+        :param retry_interval: secondes entre deux tentatives
+        :return: True quand Chabanas repond, False apres max_retries echecs
+        """
+        for attempt in range(1, max_retries + 1):
+            ready = yield self.is_ready()
+            if ready:
+                self.logger.info(f"[CHABANAS] {self.host_url} is ready")
+                return True
+            self.logger.info(
+                f"[CHABANAS] Waiting for {self.host_url} "
+                f"(attempt {attempt}/{max_retries})"
+            )
+            if attempt < max_retries:
+                yield task.deferLater(reactor, retry_interval, lambda: None)
+        return False
