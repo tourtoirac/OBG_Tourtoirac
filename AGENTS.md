@@ -106,7 +106,10 @@ leur attache un errback de journalisation.
 | `create_session` `join_session` `resume_session` | `session_joined` `{session, role, owner}` | appelant |
 | ↳ (effet de bord) | `session_players_changed` | **tous les connectés du lobby** |
 | `close_session` | `session_closed` puis `session_players_changed` | session, puis lobby |
+| `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
+| (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
 | `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` | session |
+| ↳ `acquire` refusé | `error` `session_not_started` / `players_missing` | appelant |
 | `move` | `move` `{component_id, coordinates}` | session |
 | `roll` | `roll` `{src, cooldown_seconds}` | session |
 | `rotate` | `rotate` `{orientation}` | session |
@@ -137,6 +140,14 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
   `closed`.
 - L'**owner** est déduit de `players[].owner` renvoyé par Chabanas et comparé au
   **pseudo** (`user.name`), pas à la connexion.
+- **Démarrage** (`Session.started`, `Session.player_names`) : Chabanas démarre
+  la partie quand le dernier siège est pris, ou quand l'**owner** envoie
+  `start_session` (`/session/update` avec `started: true`). Ensuite, plus aucun
+  nouveau joueur, et la valeur survit à la sauvegarde et à la reprise.
+  `acquire` n'est permis que si la partie a commencé **et** que tous les
+  sièges enregistrés (`player_names`) sont connectés comme joueurs
+  (`Session.acquire_refusal`). Les spectateurs ne comptent pas. La reprise
+  (`resume_session`) refuse `session_started` à un pseudo sans siège.
 
 ### Composants réellement chargés
 
@@ -169,7 +180,7 @@ est notre **`Token`**, et son `CounterBox` est notre **`Counter`**.
    dans `handleServerMessage` de `game.ts`.
 
 Actions actuelles : `list_sessions`, `create_session`, `join_session`,
-`resume_session`, `close_session`, `list_game`, `acquire`, `release`, `move`,
+`resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `move`,
 `roll`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`.
 
