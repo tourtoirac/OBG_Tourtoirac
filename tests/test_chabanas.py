@@ -58,15 +58,9 @@ class Backend(resource.Resource):
             return json.dumps({"session": SESSION}).encode()
 
         if path == "/session/list":
-            if "Casse" in body.get("game_name_list", []):
-                request.setResponseCode(404)
-                return b'{"error":"nope"}'
             return json.dumps({"sessions": {"CODE1": {"code": "CODE1"}}}).encode()
 
         if path == "/game/list":
-            if "Casse" in body.get("game_name_list", []):
-                request.setResponseCode(404)
-                return b'{"error":"nope"}'
             return json.dumps({"game_list": [{"name": "Waterloo"}]}).encode()
 
         if path == "/session/update":
@@ -88,6 +82,16 @@ class Backend(resource.Resource):
 
         request.setResponseCode(404)
         return b"{}"
+
+
+class FailingBackend(resource.Resource):
+    """Answers every call with a 404."""
+
+    isLeaf = True
+
+    def render_POST(self, request):
+        request.setResponseCode(404)
+        return b'{"error":"nope"}'
 
 
 class SilentBackend(resource.Resource):
@@ -124,6 +128,13 @@ def serve(on_reactor):
 def chabanas(serve):
     instance = Chabanas(LOGGER, timeout=10.0)
     instance.host_url = serve(Backend())
+    return instance
+
+
+@pytest.fixture
+def failing_chabanas(serve):
+    instance = Chabanas(LOGGER, timeout=10.0)
+    instance.host_url = serve(FailingBackend())
     return instance
 
 
@@ -173,12 +184,12 @@ class TestSuccessfulCalls:
         assert reason == "invalid_role"
 
     def test_get_active_sessions(self, chabanas, sync):
-        assert sync(chabanas.get_active_sessions(["Waterloo"], [])) == {
+        assert sync(chabanas.get_active_sessions([])) == {
             "CODE1": {"code": "CODE1"}
         }
 
     def test_get_game_list(self, chabanas, sync):
-        assert sync(chabanas.get_game_list(["Waterloo"])) == [{"name": "Waterloo"}]
+        assert sync(chabanas.get_game_list()) == [{"name": "Waterloo"}]
 
     def test_get_session_info(self, chabanas, sync):
         assert sync(chabanas.get_session_info("CODE1"))["key"] == "KEY1"
@@ -207,14 +218,14 @@ class TestFailureHandling:
         assert session is None
         assert reason == "Unable to join session"
 
-    def test_get_active_sessions_http_error(self, chabanas, sync):
-        assert sync(chabanas.get_active_sessions(["Casse"], [])) == {}
+    def test_get_active_sessions_http_error(self, failing_chabanas, sync):
+        assert sync(failing_chabanas.get_active_sessions([])) == {}
 
     def test_archive_session_http_error(self, chabanas, sync):
         assert sync(chabanas.archive_session("INCONNU")) is False
 
-    def test_get_game_list_http_error(self, chabanas, sync):
-        assert sync(chabanas.get_game_list(["Casse"])) is False
+    def test_get_game_list_http_error(self, failing_chabanas, sync):
+        assert sync(failing_chabanas.get_game_list()) is False
 
     def test_body_that_is_not_json(self, chabanas, sync):
         assert sync(chabanas._post_json("/not-json", {})) is False
@@ -231,13 +242,13 @@ class TestFailureHandling:
         instance = Chabanas(LOGGER, timeout=2.0)
         instance.host_url = "http://127.0.0.1:1"  # nothing listens there
 
-        assert sync(instance.get_game_list(["Waterloo"])) is False
+        assert sync(instance.get_game_list()) is False
 
     def test_unresolvable_host(self, sync):
         instance = Chabanas(LOGGER, timeout=2.0)
         instance.host_url = "http://not-a-real-host.invalid"
 
-        assert sync(instance.get_game_list(["Waterloo"])) is False
+        assert sync(instance.get_game_list()) is False
 
 
 class TestTimeout:
@@ -254,7 +265,7 @@ class TestTimeout:
         captured = {}
 
         def run():
-            instance.get_game_list(["Waterloo"]).addBoth(
+            instance.get_game_list().addBoth(
                 lambda result: (captured.update(value=result), finished.set())
             )
             started.set()

@@ -143,21 +143,13 @@ class TestDispatch:
         assert other.last["game"]["players"] == "2/2"
 
     def test_list_sessions(self, client):
-        receive(client, {"action": "list_sessions", "game_name_list": ["Waterloo"]})
+        receive(client, {"action": "list_sessions"})
         assert client.last_event() == "sessions_info"
 
-    def test_list_sessions_requires_a_list(self, client):
-        receive(client, {"action": "list_sessions", "game_name_list": "Waterloo"})
-        assert client.last_error() == "missing_field"
-
     def test_list_game(self, client):
-        receive(client, {"action": "list_game", "game_name_list": ["Waterloo"]})
+        receive(client, {"action": "list_game"})
         assert client.last_event() == "list_game"
         assert client.last["game_list"] == [{"name": "Waterloo"}]
-
-    def test_list_game_rejects_a_non_list(self, client):
-        receive(client, {"action": "list_game", "game_name_list": 42})
-        assert client.last_error() == "missing_game_name_list"
 
     def test_create_session_reports_a_missing_field(self, client):
         receive(client, {"action": "create_session", "game_name": "Waterloo"})
@@ -409,9 +401,7 @@ class TestErrorReporting:
         # main imports the handlers by name, so patch them where they are used
         monkeypatch.setattr(main_module, "list_game", exploding)
         client.onMessage(
-            json.dumps({
-                "action": "list_game", "game_name_list": ["Waterloo"]
-            }).encode(),
+            json.dumps({"action": "list_game"}).encode(),
             False,
         )
 

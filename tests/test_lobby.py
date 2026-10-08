@@ -6,7 +6,7 @@ from twisted.internet import defer
 
 from chabanas import Chabanas
 from lobby import Lobby
-from session import Session
+from session import Session, duplicate_component_ids
 from user import User
 
 LOGGER = logging.getLogger("tests")
@@ -132,6 +132,58 @@ class TestCreateSession:
         assert error == "Unable to create session"
         assert user.session is None
         assert lobby.sessions == {}
+
+    def test_duplicated_component_ids_refuse_the_game(self, lobby, sync, session_info):
+        """A board and a token sharing an id: the game must not start."""
+        lobby.chabanas.info["game_json"]["movable"][0]["id"] = "b1"
+        user = connect(lobby, "alice")
+
+        success, error = sync(lobby.create_session("Waterloo", user, "key"))
+
+        assert success is False
+        assert error == "duplicate_component_ids"
+        assert user.session is None
+        assert lobby.sessions == {}
+        # the session Chabanas created is archived, not left in the lobby
+        assert ("/session/archive", {"key": "KEY1"}) in lobby.chabanas.payloads
+
+    def test_duplicated_component_ids_are_logged_when_a_session_is_rebuilt(
+            self, lobby, sync, session_info, caplog):
+        """A session already stored in Chabanas is not refused, but its ids are logged."""
+        lobby.chabanas.info["game_json"]["movable"][0]["id"] = "b1"
+        user = connect(lobby, "alice")
+
+        with caplog.at_level(logging.ERROR, logger="tests"):
+            sync(lobby.join_session(session_info["code"], user, "key"))
+
+        assert "duplicated component ids ['b1']" in caplog.text
+
+
+class TestDuplicateComponentIds:
+    def test_unique_ids(self):
+        game_json = {
+            "fixed": [{"kind": "board", "id": "b1"}],
+            "movable": [{"kind": "token", "id": "t1"}],
+            "dice": [{"kind": "dice", "id": "d1"}],
+        }
+        assert duplicate_component_ids(game_json) == []
+
+    def test_duplicates_within_and_across_lists(self):
+        game_json = {
+            "fixed": [{"kind": "board", "id": "b1"}, {"kind": "counter", "id": "c1"}],
+            "movable": [
+                {"kind": "token", "id": "t1"},
+                {"kind": "token", "id": "t1"},
+                {"kind": "token", "id": "b1"},
+                {"kind": "token", "id": "t1"},
+            ],
+            "dice": [{"kind": "dice", "id": "c1"}],
+        }
+        assert duplicate_component_ids(game_json) == ["t1", "b1", "c1"]
+
+    def test_missing_lists_and_entries_without_id_are_ignored(self):
+        game_json = {"fixed": [{"kind": "board"}, {"kind": "board"}], "movable": None}
+        assert duplicate_component_ids(game_json) == []
 
 
 class TestJoinSession:
@@ -1122,7 +1174,7 @@ class TestConnectedPlayersInLobbyListing:
         sync(lobby.create_session("Waterloo", host, ""))
         lobby.chabanas.list_response = self._listing(session_info, "alice", "bob")
 
-        result = sync(lobby.return_active_sessions(["Waterloo"], []))
+        result = sync(lobby.return_active_sessions([]))
         players = result["active"]["Waterloo"][0]["players"]
 
         assert players[0]["connected"] is True
@@ -1131,7 +1183,7 @@ class TestConnectedPlayersInLobbyListing:
     def test_a_seat_nobody_is_watching_is_disconnected(self, lobby, sync, session_info):
         lobby.chabanas.list_response = self._listing(session_info, "alice")
 
-        result = sync(lobby.return_active_sessions(["Waterloo"], []))
+        result = sync(lobby.return_active_sessions([]))
 
         assert result["active"]["Waterloo"][0]["players"][0]["connected"] is False
 

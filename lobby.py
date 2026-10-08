@@ -4,7 +4,7 @@ import uuid
 from twisted.internet import defer
 
 from chabanas import Chabanas
-from session import Session
+from session import Session, duplicate_component_ids
 from user import User
 
 
@@ -18,11 +18,11 @@ class Lobby:
         self.chabanas = chabanas
 
     @defer.inlineCallbacks
-    def return_active_sessions(self, game_name_list, sat_list):
+    def return_active_sessions(self, sat_list):
         """
         Returns a list of the active sessions of the lobby
         """
-        active = yield self.chabanas.get_active_sessions(game_name_list, sat_list)
+        active = yield self.chabanas.get_active_sessions(sat_list)
         self._mark_connected_players(active)
         return {
             "active": active,
@@ -70,6 +70,15 @@ class Lobby:
         ]
 
     def _build_session(self, session_info):
+        # a session already stored in Chabanas is rebuilt here on join and on
+        # resume, without the check create_session runs: duplicated ids are
+        # only logged, so the game they break can be found and fixed
+        duplicates = duplicate_component_ids(session_info.get('game_json') or {})
+        if duplicates:
+            self.logger.error(
+                f"Session {session_info.get('key')} ({session_info.get('name')}): "
+                f"duplicated component ids {duplicates}"
+            )
         return Session(
             user=None,
             name=session_info['name'],
@@ -142,6 +151,21 @@ class Lobby:
         )
         if not session_info:
             return False, "Unable to create session"
+
+        # every component must have its own id: a duplicate would overwrite
+        # another one in components_dict. The game is refused, and the session
+        # Chabanas has just created is archived so it does not linger in the lobby
+        duplicates = duplicate_component_ids(session_info.get('game_json') or {})
+        if duplicates:
+            self.logger.error(
+                f"Game {game_name} refused: duplicated component ids {duplicates}"
+            )
+            archived = yield self.chabanas.archive_session(session_info["key"])
+            if not archived:
+                self.logger.error(
+                    f"Unable to archive refused session {session_info['key']}"
+                )
+            return False, "duplicate_component_ids"
 
         session = self._build_session(session_info)
         self.add_session(session)
@@ -318,8 +342,8 @@ class Lobby:
             del self.sessions[session.key]
 
     @defer.inlineCallbacks
-    def list_game(self, game_name_list: list):
-        game_list = yield self.chabanas.get_game_list(game_name_list)
+    def list_game(self):
+        game_list = yield self.chabanas.get_game_list()
         if game_list:
             return game_list, None
         else:

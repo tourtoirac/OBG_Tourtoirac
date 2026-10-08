@@ -64,6 +64,32 @@ def read_setup(setup):
     return entries
 
 
+def duplicate_component_ids(game_json: dict) -> list:
+    """
+    Lists the component ids a game_json declares more than once, across its
+    "fixed", "movable" and "dice" lists. Components are indexed by id in
+    Session.components_dict, so a duplicate would silently hide one of them and
+    every action on that id would hit the wrong component.
+    :param game_json: the game_json as Chabanas returns it
+    :return: the duplicated ids, in order of first appearance, empty when all
+        ids are unique
+    """
+    seen = set()
+    duplicates = []
+    for list_name in ("fixed", "movable", "dice"):
+        components = game_json.get(list_name) or []
+        if not isinstance(components, list):
+            continue
+        for component in components:
+            if not isinstance(component, dict) or 'id' not in component:
+                continue
+            component_id = component['id']
+            if component_id in seen and component_id not in duplicates:
+                duplicates.append(component_id)
+            seen.add(component_id)
+    return duplicates
+
+
 class Session:
     def __init__(
             self,

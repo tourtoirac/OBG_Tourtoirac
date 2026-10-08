@@ -184,10 +184,13 @@ class Chabanas:
         return session, None
 
     @defer.inlineCallbacks
-    def get_active_sessions(self, game_name_list, sat_list):
+    def get_active_sessions(self, sat_list):
+        """
+        Active sessions of every active game: without game_name_list,
+        Chabanas lists its whole catalogue.
+        """
         self.logger.debug("Getting lobby active sessions")
         response = yield self._post_json("/session/list", {
-            "game_name_list": game_name_list,
             "sat_list": sat_list
         })
         if not response:
@@ -246,10 +249,12 @@ class Chabanas:
         return status == 200
 
     @defer.inlineCallbacks
-    def get_game_list(self, game_name_list: list):
-        response = yield self._post_json("/game/list", {
-            "game_name_list": game_name_list,
-        })
+    def get_game_list(self):
+        """
+        Description of every active game: without game_name_list, Chabanas
+        returns its whole catalogue.
+        """
+        response = yield self._post_json("/game/list", {})
         if not response:
             return False
         game_list = response.get('game_list')

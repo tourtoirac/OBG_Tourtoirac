@@ -10,23 +10,26 @@ ROTATE_DIRECTIONS = {
 }
 
 @defer.inlineCallbacks
-def list_sessions(self, logger, message):
+def list_sessions(self, logger, _):
+    """
+    Lists the active sessions of every active game: Chabanas owns the
+    catalogue, the client does not choose the games.
+    """
     logger.debug("Process list_sessions message")
     user = self.factory.lobby.get_user(self)
-    if 'game_name_list' not in message or not isinstance(message['game_name_list'], list):
-        self.send_error(
-            "missing_field",
-            "The list_sessions message requires a game_name_list list field"
-        )
-        return
-
-    sessions_info = yield self.factory.lobby.return_active_sessions(message['game_name_list'], sat_list=[])
+    sessions_info = yield self.factory.lobby.return_active_sessions(sat_list=[])
     user.send(
         {
             "event": "sessions_info",
             "content": sessions_info
         }
     )
+
+# what the server answers when a game cannot be created
+CREATE_REFUSALS = {
+    "duplicate_component_ids": "This game declares several components with the same id: it cannot be started",
+}
+
 
 @defer.inlineCallbacks
 def create_session(self, logger, message):
@@ -71,7 +74,7 @@ def create_session(self, logger, message):
     if not success:
         self.send_error(
             error,
-            f"Unable to join game {game_name}"
+            CREATE_REFUSALS.get(error, f"Unable to join game {game_name}")
         )
         return
     logger.debug(f"{user.name} joined game {game_name}")
@@ -287,35 +290,12 @@ def resume_session(self, logger, message):
 
 
 @defer.inlineCallbacks
-def list_game(self, _, message):
+def list_game(self, _, __):
+    """
+    Sends the description of every active game of the Chabanas catalogue.
+    """
     user = self.factory.lobby.get_user(self)
-    required_fields = ["game_name_list"]
-    for required_field in required_fields:
-        if required_field not in message:
-            self.send_error(
-                "missing_field",
-                f"The list_game message requires a {required_field} field"
-            )
-            return
-    game_name_list = message["game_name_list"]
-
-    if game_name_list is None:
-        self.send_error(
-            "missing_game_name_list",
-            "The list_game message requires a game_name_list"
-        )
-        return
-
-    if not isinstance(game_name_list, list):
-        self.send_error(
-            "missing_game_name_list",
-            "The game_name_list content can't be None"
-        )
-        return
-
-    result, error = yield self.factory.lobby.list_game(
-        game_name_list,
-    )
+    result, error = yield self.factory.lobby.list_game()
     if not result:
         self.send_error(
             error,

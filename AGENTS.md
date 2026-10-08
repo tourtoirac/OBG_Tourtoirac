@@ -128,6 +128,13 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
   (`access_key`, `key`, places), puis on construit la `Session` à partir du
   `game_json` qu'il renvoie si elle n'est pas déjà en mémoire. Si elle y est,
   l'état en mémoire **prime** sur ce que Chabanas renvoie.
+- **Ids en double** : à la création, `lobby.create_session` refuse un
+  `game_json` dont deux composants (`fixed`, `movable`, `dice` confondus)
+  partagent un `id` (`session.duplicate_component_ids`). La session que
+  Chabanas vient de créer est archivée, et l'appelant reçoit l'erreur
+  `duplicate_component_ids`, affichée par `lobby.ts`.
+  Une session déjà stockée (adhésion, reprise) n'est pas refusée :
+  `_build_session` journalise seulement ses ids en double, en `ERROR`.
 - **Passage lobby → jeu** : ce sont deux pages, donc deux WebSocket. La
   fermeture de la connexion du lobby peut vider la session. `lobby.delete_user`
   appelle alors `_save_state_if_empty`, qui envoie `game_json_state()` à
@@ -199,8 +206,9 @@ configuration réelle est en dur dans le code :
 | Délai HTTP | `chabanas.py`, `Chabanas.__init__` | `10.0` s |
 
 Aucune variable d'environnement n'est lue. La liste des jeux affichés vient
-du client (`Raffaillac/public/conf.json`), qui la transmet dans chaque
-`list_game` et `list_sessions`.
+de Chabanas (jeux `active`) : `list_game` et `list_sessions` n'attendent aucun
+`game_name_list`, et Tourtoirac n'en envoie pas à `/game/list` ni à
+`/session/list`.
 
 ## Démarrage
 
@@ -242,7 +250,10 @@ par là plutôt que par une logique de face séparée.
 
 ## Conventions
 
-- Commentaires et docstrings **en français**, contrairement à `Chabanas`.
+- Commentaires et docstrings **en anglais**, comme dans les autres dépôts.
+  Une grande partie du code existant est encore commentée en français : écrire
+  en anglais tout commentaire ajouté ou modifié, sans traduire en masse le
+  reste (cela noierait le diff).
 - `session.py` est commité en **CRLF** : préserver les fins de ligne, sinon le
   diff porte sur tout le fichier.
 - Les états sont sérialisés par des méthodes `return_*_json` sur les classes.
