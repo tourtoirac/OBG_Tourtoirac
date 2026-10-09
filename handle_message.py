@@ -405,7 +405,9 @@ def release(self, logger, message):
     # position de depot : le client l'envoie pour que le rectangle vert puisse
     # revenir si le jeton retrouve son emplacement initial
     if "x" in message and "y" in message:
-        component.place(message["x"], message["y"], user)
+        # on a board with a hex grid, the token is pulled onto the nearest hex
+        x, y = user.session.snap_to_grid(component, message["x"], message["y"])
+        component.place(x, y, user)
     released = component.release(user)
     if released:
         # un pion relâché se pose au-dessus de la pile : il repasse en fin de

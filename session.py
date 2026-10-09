@@ -2,6 +2,7 @@ from unittest import loader
 
 from user import User
 from Components.board import Board
+from Components.board_group import BoardGroup
 from Components.counter import Counter, DEFAULT_COUNTER_COLOR
 from Components.dice import Dice
 from Components.token import Token
@@ -83,10 +84,16 @@ def duplicate_component_ids(game_json: dict) -> list:
         for component in components:
             if not isinstance(component, dict) or 'id' not in component:
                 continue
-            component_id = component['id']
-            if component_id in seen and component_id not in duplicates:
-                duplicates.append(component_id)
-            seen.add(component_id)
+            # the boards of a board_group are indexed by their own id, like a
+            # board declared alone: they share the same namespace
+            nested = component.get('boards') if component.get('kind') == 'board_group' else None
+            ids = [component['id']]
+            if isinstance(nested, list):
+                ids += [board['id'] for board in nested if isinstance(board, dict) and 'id' in board]
+            for component_id in ids:
+                if component_id in seen and component_id not in duplicates:
+                    duplicates.append(component_id)
+                seen.add(component_id)
     return duplicates
 
 
@@ -162,19 +169,13 @@ class Session:
             for component in self.game_json.get(list_name, []):
                 match component['kind']:
                     case 'board':
-                        game_component = Board(
-                            component['id'],
-                            component['x'],
-                            component['y'],
-                            component['src'],
-                            component['width'],
-                            component['height'],
-                            # flippable : absent d'un game_json de jeu, present
-                            # seulement si le jeu autorise le retournement
-                            component.get('flippable', False)
-                        )
+                        game_component = self.build_board(component)
                         self.components_lists["fixed"].append(game_component)
                         self.components_dict[component['id']] = game_component
+                    case 'board_group':
+                        game_component = self.build_board_group(component)
+                        if game_component is not None:
+                            self.components_lists["fixed"].append(game_component)
                     case 'counter':
                         # un compteur est fige comme un plateau, mais cliquable :
                         # le client dessine son fond et ses deux zones + et -
@@ -245,6 +246,67 @@ class Session:
                         )
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component
+
+    @staticmethod
+    def build_board(component: dict) -> Board:
+        """
+        Builds a board from its game_json description, whether it is declared
+        alone or inside a board_group.
+        :param component: the board description from the game_json
+        """
+        return Board(
+            component['id'],
+            component['x'],
+            component['y'],
+            component['src'],
+            component['width'],
+            component['height'],
+            # grid: optional hex grid released tokens snap to, when the
+            # board_group holding the board has magnetism
+            component.get('grid')
+        )
+
+    def build_board_group(self, component: dict) -> BoardGroup | None:
+        """
+        Builds a board_group and indexes each of its boards by its own id: the
+        setup moves them and the grid snap reads them like boards declared
+        alone. The group itself is not indexed: no action targets it, and a
+        setup entry naming it is ignored like any unknown id.
+        :param component: the board_group description from the game_json
+        :return: the group, or None when it holds no board
+        """
+        boards = [
+            self.build_board(item)
+            for item in component.get('boards') or []
+            # a group only holds boards: anything else is ignored, like an
+            # unknown kind in the "fixed" list
+            if isinstance(item, dict) and item.get('kind') == 'board'
+        ]
+        if not boards:
+            return None
+        for board in boards:
+            self.components_dict[board.id] = board
+        return BoardGroup(
+            component['id'],
+            boards,
+            component.get('flippable', False),
+            # magnetism: tokens snap to the grids of the boards only when true
+            component.get('magnetism', False)
+        )
+
+    def boards(self) -> list:
+        """
+        Every board of the session in drawing order, the boards of a
+        board_group taking the place of their group.
+        :return: list of Board
+        """
+        boards = []
+        for component in self.components_lists['fixed']:
+            if isinstance(component, BoardGroup):
+                boards.extend(component.boards)
+            elif isinstance(component, Board):
+                boards.append(component)
+        return boards
 
     def add_dice(self, component: dict, list_name: str):
         """
@@ -326,6 +388,9 @@ class Session:
             value = saved.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 saved[key] = round(value)
+        # the boards of a board_group are saved inside it
+        if isinstance(saved.get('boards'), list):
+            saved['boards'] = [Session._rounded_position(board) for board in saved['boards']]
         return saved
 
     def fix_positions_disabled(self) -> bool:
@@ -501,6 +566,37 @@ class Session:
 
     def get_component(self, component_id):
         return self.components_dict.get(component_id, False)
+
+    def snap_to_grid(self, component, x, y):
+        """
+        Where a token released at (x, y) lands: its center is pulled onto the
+        center of the nearest hex of the board it is dropped on, when that board
+        has a grid and its board_group has magnetism.
+
+        A token dropped back near its starting square keeps that rule: place()
+        snaps it there and gives it back its green rectangle, which wins over
+        the grid.
+        :param x: top-left corner of the token, as sent by the client
+        :return: the (x, y) top-left corner to place the token at
+        """
+        if getattr(component, 'kind', None) != 'token':
+            return x, y
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            return x, y
+        if component.move_border and component.near_initial_position(x, y):
+            return x, y
+        center_x = x + component.width / 2
+        center_y = y + component.height / 2
+        # boards are drawn in list order: the last one under the point is the
+        # one the player sees, and only its grid counts
+        for board in reversed(self.boards()):
+            if not board.contains(center_x, center_y):
+                continue
+            snapped = board.snap_point(center_x, center_y)
+            if snapped is None:
+                return x, y
+            return snapped[0] - component.width / 2, snapped[1] - component.height / 2
+        return x, y
 
     def bring_to_front(self, component):
         """

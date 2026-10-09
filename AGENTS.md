@@ -54,7 +54,7 @@ ni réseau ni service externe ne sont requis.
 | `main.py`              | `GameWebSocketProtocol`, dispatch, démarrage (`main`, `start_server`) |
 | `handle_message.py`    | Dispatch : un handler par action |
 | `session.py`           | **Cœur** : état de la partie, composants, diffusion |
-| `Components/`          | `board`, `bag`, `card`, `counter`, `deck`, `dice`, `token`, `component` |
+| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `token`, `component`, `hex_grid` |
 | `chabanas.py`          | Client HTTP vers le back-end, via `IBodyProducer` |
 | `lobby.py` `user.py`   | Lobby et utilisateur connecté |
 | `player_sim.py`        | Simulateur de joueur, pour essai manuel |
@@ -158,11 +158,12 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que quatre `kind` :
+`Session.load_session_components` ne reconnaît que cinq `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
 | `board` | `Board` | `fixed` | |
+| `board_group` | `BoardGroup` | `fixed` | 1 à n `board` retournés ensemble (voir § Groupe de plateaux) |
 | `counter` | `Counter` | `fixed` | compteur numérique ± (`min`/`max`/`color`) |
 | `dice` | `Dice` | `dice` | accepté dans les trois listes ; `origin_list` mémorise d'où il vient pour la sauvegarde |
 | `token` | `Token` | `movable` | uniquement s'il est déclaré dans `movable` |
@@ -232,6 +233,68 @@ lignes `[CHABANAS] Waiting for ...` du journal.
 exige qu'un pion soit *flippable* — c'est-à-dire qu'il possède une image de
 revers (`back_src`). `Token.flip()` délègue désormais à `set_side()` : passer
 par là plutôt que par une logique de face séparée.
+
+## Grille hexagonale d'un plateau
+
+Un `board` peut porter une clé optionnelle `grid`. Quand le **`board_group`**
+qui le contient a `"magnetism": true`, au `release`, le centre du pion lâché est
+aimanté sur le centre de l'hexagone le plus proche. Sans `magnetism` sur le
+groupe (ou s'il ne vaut pas le booléen `true`), et pour un plateau seul, la
+grille n'aimante rien : elle ne sert qu'à l'affichage de calibrage (touche G de
+Raffaillac). Un `board` n'a plus de clé `magnetism` (ni lue, ni sauvegardée) :
+`Board.snap_point` lit `board.group.magnetism`.
+
+```json
+"grid": {"type": "hex", "orientation": "flat", "origin_x": 112.5,
+         "origin_y": 98.0, "size": 64.3, "size_y": 63.8, "snap_radius": 40}
+```
+
+- Coordonnées **relatives au coin haut-gauche du plateau**, en unités du
+  `game_json` (`width`/`height` du plateau), pas en pixels de l'image.
+  `orientation` : `flat` (défaut) ou `pointy`. `size` = rayon centre → coin.
+  `size_y` (défaut `size`) et `snap_radius` (défaut : pas de limite) sont
+  facultatifs.
+- Calcul dans `Components/hex_grid.py` (`HexGrid`), appelé par
+  `Session.snap_to_grid` depuis le handler `release`. Seul compte le plateau
+  **le plus haut** sous le centre du pion ; s'il n'a pas de grille, pas
+  d'aimantage. Seuls les `token` sont aimantés.
+- Le retour sur la case de départ (`near_initial_position`) **prime** sur la
+  grille.
+- Une grille mal écrite est ignorée (`None`), sans erreur.
+- `Board.return_json()` renvoie `grid` : la grille survit à la sauvegarde.
+- Raffaillac refait le même calcul (`src/engine/hex_grid.ts`) pour
+  l'aperçu : toute modification de l'un doit être reportée dans l'autre.
+
+## Groupe de plateaux (`board_group`)
+
+Un `board_group` regroupe 1 à n plateaux qui forment une seule carte. Avec
+`flippable`, Raffaillac les retourne **tous ensemble**, d'un demi-tour autour du
+centre du rectangle englobant du groupe : les plateaux échangent leurs places
+comme le ferait une carte d'un seul tenant, et tout ce qui est posé dessus
+(pions, fantômes, compteurs, dés, grille) suit. Le retournement reste local au
+joueur : le serveur ne retourne rien.
+
+**Un `board` seul ne se retourne pas et n'aimante pas** : il n'a plus de clés
+`flippable` ni `magnetism` (ni lues, ni sauvegardées). Pour qu'une carte se
+retourne ou aimante les pions, il faut l'envelopper dans un `board_group`, même
+avec un seul plateau. `magnetism` vaut pour les grilles de tous les plateaux du
+groupe.
+
+```json
+{"kind": "board_group", "id": "map", "flippable": true, "magnetism": true,
+ "boards": [{"kind": "board", "id": "north", ...}, {"kind": "board", "id": "south", ...}]}
+```
+
+- Chaque plateau du groupe est un `Board` ordinaire, indexé par **son** `id`
+  dans `components_dict` : le setup le déplace et sa grille aimante les pions si le groupe a
+  `magnetism`. `BoardGroup` pose `board.group` sur chacun de ses plateaux.
+  `Session.boards()` aplatit les groupes dans l'ordre de dessin (utilisé par
+  `snap_to_grid`).
+- Le groupe lui-même **n'est pas** dans `components_dict` : aucune action ne le
+  vise, et une entrée de setup qui le nomme est ignorée.
+- Un groupe sans aucun `board` est ignoré. Tout autre `kind` à l'intérieur est
+  ignoré.
+- `duplicate_component_ids` compte aussi les `id` des plateaux d'un groupe.
 
 ## `game_json` et `setup`
 
