@@ -67,6 +67,25 @@ def read_setup(setup):
     return entries
 
 
+def read_nationalities(game_json) -> list:
+    """
+    Reads the optional "nationalities" key of the options of a game_json: the
+    sides the players choose from when they take a seat. Same reading as Chabanas
+    (Game/tools.py), which is the one that enforces the choice.
+    :return: the nationalities in the order of the game_json, without
+        duplicates; empty when the game declares none
+    """
+    options = game_json.get('options') if isinstance(game_json, dict) else None
+    declared = options.get('nationalities') if isinstance(options, dict) else None
+    if not isinstance(declared, list):
+        return []
+    nationalities = []
+    for nationality in declared:
+        if isinstance(nationality, str) and nationality and nationality not in nationalities:
+            nationalities.append(nationality)
+    return nationalities
+
+
 def expand_copies(component) -> list:
     """
     A token declared with "copies": n stands for n identical tokens: it is
@@ -158,6 +177,7 @@ class Session:
             owner_nickname: str | None = None,
             started: bool = False,
             player_names: list | None = None,
+            player_nationalities: dict | None = None,
             ):
         self.key = key
         self.name = name
@@ -208,6 +228,11 @@ class Session:
         # connectes ou non. Une partie commencee attend qu'ils soient tous la
         # avant de laisser prendre un pion.
         self.player_names = list(player_names or [])
+        # nationalities: the sides the game declares, empty for a game without
+        # any. No rule depends on them yet: they are only carried to the clients.
+        self.nationalities = read_nationalities(game_json)
+        # the nationality Chabanas stored on each seat, by nickname
+        self.player_nationalities = dict(player_nationalities or {})
         self.load_session_components()
 
     def load_session_components(self):
@@ -311,7 +336,9 @@ class Session:
             # reprise apres une sauvegarde ; le Token retombe alors
             # sur le x/y qu'il avait a l'installation du jeu
             component.get('origin_x'),
-            component.get('origin_y')
+            component.get('origin_y'),
+            # nationality: the side this token belongs to, when the game says so
+            component.get('nationality')
         )
 
     def build_bag(self, component: dict) -> Bag:
@@ -387,9 +414,10 @@ class Session:
         it comes back on the table, above the others, centered on (x, y).
         :param x: where the player clicked; the center of the bag when the
             client gives no usable point
-        :return: the token, or None when the bag is empty
+        :return: the token, or None when the bag holds none that user may
+            take: it is empty, or all its tokens belong to another nationality
         """
-        token = bag.pick()
+        token = bag.pick(user)
         if token is None:
             return None
         if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
@@ -607,6 +635,8 @@ class Session:
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
             "started": self.started,
             "missing_players": self.missing_players(),
+            "nationalities": self.nationalities,
+            "player_nationalities": self.player_nationalities,
             # le setup en attente que le client applique : une fois la partie
             # installee, la liste est vide et personne ne rejoue la mise en place
             "setup": self.pending_setup(),
@@ -618,7 +648,7 @@ class Session:
         }
         return session_json
 
-    def refresh_seats(self, started: bool, player_names: list) -> None:
+    def refresh_seats(self, started: bool, player_names: list, player_nationalities: dict | None = None) -> None:
         """
         Reprend ce que Chabanas vient de dire de la session : les sieges
         enregistres, et si la partie a commence. Une partie commencee ne
@@ -626,6 +656,8 @@ class Session:
         """
         self.started = self.started or bool(started)
         self.player_names = list(player_names)
+        if player_nationalities is not None:
+            self.player_nationalities = dict(player_nationalities)
 
     def missing_players(self) -> list:
         """
@@ -705,6 +737,8 @@ class Session:
                     return False, f"Session is full ({self.max_players} players)"
                 self.players.append(user)
                 user.role = 'player'
+                # the seat carries the nationality, not the connection
+                user.nationality = self.player_nationalities.get(user.name)
                 return True, None
             case 'watcher':
                 if len(self.watchers) >= self.max_watchers:
@@ -713,6 +747,7 @@ class Session:
                     return False, "watchers_full"
                 self.watchers.append(user)
                 user.role = 'watcher'
+                user.nationality = None
                 return True, None
             case _:
                 return False, f"Invalid role '{role}'"

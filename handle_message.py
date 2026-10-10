@@ -27,6 +27,7 @@ def list_sessions(self, logger, _):
 
 # what the server answers when a game cannot be created
 CREATE_REFUSALS = {
+    "invalid_nationality": "This game requires choosing one of its nationalities",
     "duplicate_component_ids": "This game declares several components with the same id: it cannot be started",
 }
 
@@ -52,6 +53,8 @@ def create_session(self, logger, message):
     session_max_players = message.get("session_max_players", None)
     access_key = message.get("access_key", None)
     variant_name = message.get("variant_name", None)
+    # only read by a game that declares nationalities; Chabanas checks it
+    nationality = message.get("nationality", None)
 
     if game_name is None:
         self.send_error(
@@ -69,6 +72,7 @@ def create_session(self, logger, message):
         session_max_players,
         access_key,
         variant_name,
+        nationality,
     )
 
     if not success:
@@ -84,6 +88,7 @@ def create_session(self, logger, message):
             "event": "session_joined",
             "session": user.session.return_session_json(),
             "role": user.role,
+            "nationality": user.nationality,
             # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
             # peut le savoir que si le serveur le lui dit
             "owner": user.session.is_owner(user)
@@ -102,6 +107,7 @@ JOIN_REFUSALS = {
     "invalid_role": "Invalid role",
     "session_closed": "This game is closed",
     "nickname_connected": "This nickname is already playing",
+    "invalid_nationality": "This game requires choosing one of its nationalities",
 }
 
 
@@ -229,13 +235,17 @@ def join_session(self, logger, message):
     # nouveau siège ou de reconnaître un joueur déjà connu
     player_key = message.get("key", "")
     access_key = message.get("access_key", "")
+    # asked of a new player when the game declares nationalities; a returning
+    # player keeps the one of their seat
+    nationality = message.get("nationality", None)
 
     success, error = yield self.factory.lobby.join_session(
         session_code,
         user,
         player_key,
         role,
-        access_key
+        access_key,
+        nationality
     )
 
     if not success:
@@ -248,6 +258,7 @@ def join_session(self, logger, message):
             "event": "session_joined",
             "session": user.session.return_session_json(),
             "role": user.role,
+            "nationality": user.nationality,
             # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
             # peut le savoir que si le serveur le lui dit
             "owner": user.session.is_owner(user)
@@ -285,6 +296,7 @@ def resume_session(self, logger, message):
         "event": "session_joined",
         "session": user.session.return_session_json(),
         "role": user.role,
+        "nationality": user.nationality,
         "owner": user.session.is_owner(user)
     })
 
@@ -391,6 +403,15 @@ def acquire(self, logger, message):
         )
         return
 
+    # a token that belongs to a nationality is only taken by a player of that
+    # nationality: checked here, the client only saves itself the request
+    if not component.acquirable_by(user):
+        self.send_error(
+            "wrong_nationality",
+            f"Component {component_id} belongs to {component.nationality}"
+        )
+        return
+
     acquired = component.acquire(user)
     acquire_message = {
                 "event": "acquire",
@@ -479,7 +500,14 @@ def pick(self, logger, message):
     request_id = message.get("request_id")
     token = user.session.pick_from_bag(component, user, message.get("x"), message.get("y"))
     if token is None:
-        self.send_error("bag_empty", f"Bag {component_id} is empty")
+        if component.components:
+            # tokens are left, but they all belong to another nationality
+            self.send_error(
+                "wrong_nationality",
+                f"Bag {component_id} holds no token this player may take"
+            )
+        else:
+            self.send_error("bag_empty", f"Bag {component_id} is empty")
         return
 
     # sent to everyone: each screen takes the token out of its bag and shows

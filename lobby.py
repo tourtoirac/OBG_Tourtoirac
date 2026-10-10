@@ -69,6 +69,18 @@ class Lobby:
             if player.get("nickname")
         ]
 
+    @staticmethod
+    def _seat_nationalities(session_info: dict) -> dict:
+        """
+        The nationality Chabanas stored on each seat, by nickname. Chabanas is
+        the only judge of it: a player chooses once, when taking the seat.
+        """
+        return {
+            player["nickname"]: player["nationality"]
+            for player in session_info.get("players") or []
+            if player.get("nickname") and player.get("nationality")
+        }
+
     def _build_session(self, session_info):
         # a session already stored in Chabanas is rebuilt here on join and on
         # resume, without the check create_session runs: duplicated ids are
@@ -89,7 +101,8 @@ class Lobby:
             game_json=session_info['game_json'],
             owner_nickname=self._owner_of(session_info),
             started=session_info.get("started", False),
-            player_names=self._seat_names(session_info)
+            player_names=self._seat_names(session_info),
+            player_nationalities=self._seat_nationalities(session_info)
         )
 
     def _refresh_seats(self, session: Session, session_info: dict) -> None:
@@ -99,7 +112,8 @@ class Lobby:
         """
         session.refresh_seats(
             session_info.get("started", False),
-            self._seat_names(session_info)
+            self._seat_names(session_info),
+            self._seat_nationalities(session_info)
         )
 
     @staticmethod
@@ -136,10 +150,11 @@ class Lobby:
             session_min_players: int | None = None,
             session_max_players: int | None = None,
             access_key: str | None = None,
-            variant_name: str | None = None
+            variant_name: str | None = None,
+            nationality: str | None = None
     ):
         # checks if a session can be created with that user
-        session_info = yield self.chabanas.create_session(
+        session_info, reason = yield self.chabanas.create_session(
             game_name,
             user,
             key,
@@ -147,10 +162,11 @@ class Lobby:
             session_min_players,
             session_max_players,
             access_key,
-            variant_name
+            variant_name,
+            nationality
         )
         if not session_info:
-            return False, "Unable to create session"
+            return False, reason or "Unable to create session"
 
         # every component must have its own id: a duplicate would overwrite
         # another one in components_dict. The game is refused, and the session
@@ -180,7 +196,8 @@ class Lobby:
         return True, None
 
     @defer.inlineCallbacks
-    def join_session(self, session_code: str, user: User, key: str = "", role: str = "player", access_key: str = ""):
+    def join_session(self, session_code: str, user: User, key: str = "", role: str = "player", access_key: str = "",
+                     nationality: str | None = None):
         self.logger.debug(f"Trying to find opened session with code {session_code}")
 
         # un pseudo actuellement assis a la table ne peut pas etre repris par une
@@ -196,7 +213,7 @@ class Lobby:
         # quand la session est deja chargee ici, sinon on laisserait rejoindre
         # n'importe qui avec un code devine.
         session_info, reason = yield self.chabanas.join_session(
-            session_code, user, key, access_key, role
+            session_code, user, key, access_key, role, nationality
         )
         if not session_info:
             return False, reason

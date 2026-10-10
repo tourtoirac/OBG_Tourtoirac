@@ -115,10 +115,15 @@ class Chabanas:
             session_min_players: int | None,
             session_max_players: int | None,
             access_key: str | None = None,
-            variant_name: str | None = None
+            variant_name: str | None = None,
+            nationality: str | None = None
     ):
-        # Try creating a session
-        created = yield self._post_json("/session/create", {
+        """
+        Creates a session in Chabanas, then reads it back with its game_json.
+
+        :return: (session_info, None) on success, (None, reason) otherwise.
+        """
+        status, created = yield self._post_json("/session/create", {
             "game_name": game_name,
             "nickname": user.name,
             "key": key,
@@ -127,26 +132,31 @@ class Chabanas:
             "session_max_players": session_max_players,
             "access_key": access_key,
             "variant_name": variant_name,
-        })
+            "nationality": nationality,
+        }, with_status=True)
+        if status == 422:
+            # the game declares nationalities and the player chose none of them
+            return None, "invalid_nationality"
         if not created:
-            return False
+            return None, "Unable to create session"
 
         session_code = created.get("session_code")
         if not session_code:
             self.logger.error("[CHABANAS] Response has no 'session_code' field")
-            return False
+            return None, "Unable to create session"
 
         session_info = yield self._post_json("/session/get", {
             "session_code": session_code,
             "sat_list": ["game_json"],
         })
-        if not session_info:
-            return False
-
-        return self._extract_session(session_info)
+        session = self._extract_session(session_info) if session_info else False
+        if not session:
+            return None, "Unable to create session"
+        return session, None
 
     @defer.inlineCallbacks
-    def join_session(self, session_code: str, user: User, key: str, access_key: str = "", role: str = "player"):
+    def join_session(self, session_code: str, user: User, key: str, access_key: str = "", role: str = "player",
+                     nationality: str | None = None):
         """
         Asks Chabanas whether that user may join. Chabanas alone knows the
         session's access_key and the key of every nickname, so it is the only
@@ -159,7 +169,8 @@ class Chabanas:
             "nickname": user.name,
             "key": key,
             "access_key": access_key,
-            "role": role
+            "role": role,
+            "nationality": nationality,
         }, with_status=True)
 
         if status == 400:
@@ -173,6 +184,9 @@ class Chabanas:
             return None, "watchers_not_allowed"
         if status == 409:
             return None, "session_unavailable"
+        if status == 422:
+            # a new player of a game with nationalities must choose one of them
+            return None, "invalid_nationality"
         if not response:
             return None, "Unable to join session"
         # /session/join returns the session object at the root of the response,

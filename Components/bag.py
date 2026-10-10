@@ -42,14 +42,20 @@ class Bag(Component):
         component.leave_table()
         self.components.append(component)
 
-    def pick(self):
+    def pick(self, user=None):
         """
         Takes one token out of the bag, at random.
-        :return: the token, or None when the bag is empty
+        :param user: when given, only the tokens that user may acquire are
+            candidates: a token of another nationality stays in the bag
+        :return: the token, or None when the bag holds none to take
         """
-        if not self.components:
+        candidates = [
+            component for component in self.components
+            if user is None or component.acquirable_by(user)
+        ]
+        if not candidates:
             return None
-        picked = random.choice(self.components)  # NOSONAR
+        picked = random.choice(candidates)  # NOSONAR
         self.components.remove(picked)
         return picked
 

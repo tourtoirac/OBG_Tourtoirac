@@ -9,6 +9,9 @@ class User:
         self.session = None
         self.acquired = []
         self.role = None
+        # the side this player took in the session, among the nationalities of
+        # the game; None for a watcher or when the game declares none
+        self.nationality = None
 
     def return_user_json(self) -> dict:
         """
@@ -20,7 +23,8 @@ class User:
             "name": self.name,
             "session": self.session.key,
             "acquired": self.acquired,
-            "role": self.role
+            "role": self.role,
+            "nationality": self.nationality
         }
         return user_json
 

@@ -28,9 +28,12 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None, nationality=None):
         super().__init__(component_id)
         self.kind = 'token'
+        # nationality: the side the token belongs to, among the nationalities
+        # of the game; None on a token that belongs to nobody
+        self.nationality = nationality if isinstance(nationality, str) and nationality else None
         self.x = x
         self.y = y
         # origin : le jeu peut poser une image du pion en transparence sur sa
@@ -154,6 +157,13 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
             return abs(x - self.origin_x) < self.width and abs(y - self.origin_y) < self.height
         return False
 
+    def acquirable_by(self, user: User) -> bool:
+        """
+        A token that belongs to a nationality is only taken by a player of
+        that nationality; a token without one is taken by anybody.
+        """
+        return self.nationality is None or self.nationality == getattr(user, 'nationality', None)
+
     def acquire(self, user: User):
         if self.acquired_by is not None and self.acquired_by != user:
             print(f"acquired by: {self.acquired_by}")
@@ -265,5 +275,6 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
             # ou le fantome est pose. Il ne bouge jamais : ces deux champs sont la
             # seule chose qui survive telle quelle a une sauvegarde de session
             "origin_x": self.origin_x,
-            "origin_y": self.origin_y
+            "origin_y": self.origin_y,
+            "nationality": self.nationality
         }

@@ -21,6 +21,14 @@ class Component:
         """
         return False
 
+    def acquirable_by(self, user: User) -> bool:
+        """
+        Whether the rules of the game let that user take the component in
+        hand. Only a token that belongs to a nationality restricts it.
+        :return: True when user may acquire the component
+        """
+        return True
+
     def add(self, container_name: str, component, position: int = 0):
         """
         placeholder function

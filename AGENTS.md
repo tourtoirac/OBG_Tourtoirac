@@ -103,7 +103,7 @@ leur attache un errback de journalisation.
 | ------ | --------- | ------------- |
 | `list_game` | `list_game` `{game_list}` | appelant |
 | `list_sessions` | `sessions_info` `{content: {active}}` | appelant |
-| `create_session` `join_session` `resume_session` | `session_joined` `{session, role, owner}` | appelant |
+| `create_session` `join_session` `resume_session` | `session_joined` `{session, role, owner, nationality}` | appelant |
 | ↳ (effet de bord) | `session_players_changed` | **tous les connectés du lobby** |
 | `close_session` | `session_closed` puis `session_players_changed` | session, puis lobby |
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
@@ -237,6 +237,39 @@ lignes `[CHABANAS] Waiting for ...` du journal.
 exige qu'un pion soit *flippable* — c'est-à-dire qu'il possède une image de
 revers (`back_src`). `Token.flip()` délègue désormais à `set_side()` : passer
 par là plutôt que par une logique de face séparée.
+
+## Nationalités (`nationalities`)
+
+Notion **facultative** : un `game_json` peut déclarer, **dans ses `options`**,
+`"nationalities": ["US", "NVA"]` (la clé n'est pas lue à la racine), et un `token` peut porter
+`"nationality": "US"`.
+
+**Seule règle pour l'instant** : un pion qui porte une nationalité n'est pris
+en main que par un joueur de cette nationalité (`Component.acquirable_by`,
+redéfini par `Token`). `acquire` répond sinon par l'erreur `wrong_nationality`,
+sans rien diffuser. `pick` ne tire que parmi les pions du sac que le joueur
+peut prendre (`Bag.pick(user)`) ; s'il n'en reste que d'autres nationalités,
+même erreur. Un pion sans nationalité reste à tout le monde ; un joueur sans
+nationalité ne prend aucun pion qui en a une. `rotate` et `flip` ne sont pas
+restreints.
+
+- Le joueur choisit sa nationalité en créant ou en rejoignant la partie
+  (champ `nationality` de `create_session` / `join_session`). **Chabanas est
+  seul juge** : il exige une valeur de la liste pour tout nouveau siège (422 →
+  erreur `invalid_nationality`) et la stocke sur le siège. Plusieurs joueurs
+  peuvent partager la même.
+- `Session.player_nationalities` (`{pseudo: nationalité}`) est relu depuis la
+  liste `players` de Chabanas (`Lobby._seat_nationalities`), à la construction
+  et à chaque adhésion (`refresh_seats`). `Session.add_user` pose
+  `user.nationality` à partir du **pseudo** : le siège porte la nationalité,
+  pas la connexion. Un spectateur a `None`.
+- `return_session_json` renvoie `nationalities` et `player_nationalities` ;
+  `session_joined` renvoie celle de l'appelant.
+- `Token.nationality` (`None` si absente ou mal écrite) est renvoyée par
+  `return_json` : elle survit à la sauvegarde. `session.read_nationalities`
+  fait la même lecture que `Chabanas/Game/tools.py`.
+- `Chabanas.create_session` renvoie désormais `(session_info, reason)`, comme
+  `join_session`.
 
 ## Copies d'un pion (`copies`)
 
