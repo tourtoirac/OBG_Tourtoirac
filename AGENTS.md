@@ -54,7 +54,7 @@ ni réseau ni service externe ne sont requis.
 | `main.py`              | `GameWebSocketProtocol`, dispatch, démarrage (`main`, `start_server`) |
 | `handle_message.py`    | Dispatch : un handler par action |
 | `session.py`           | **Cœur** : état de la partie, composants, diffusion |
-| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `token`, `component`, `hex_grid` |
+| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `dice_pool`, `token`, `component`, `hex_grid` |
 | `chabanas.py`          | Client HTTP vers le back-end, via `IBodyProducer` |
 | `lobby.py` `user.py`   | Lobby et utilisateur connecté |
 | `player_sim.py`        | Simulateur de joueur, pour essai manuel |
@@ -108,10 +108,12 @@ leur attache un errback de journalisation.
 | `close_session` | `session_closed` puis `session_players_changed` | session, puis lobby |
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
-| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` | session |
+| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`) | session |
+| `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` | session |
 | ↳ `acquire` refusé | `error` `session_not_started` / `players_missing` | appelant |
 | `move` | `move` `{component_id, coordinates}` | session |
 | `roll` | `roll` `{src, cooldown_seconds}` | session |
+| `roll_pool` | `roll_pool` `{component_id, dice: [{component_id, src, cooldown_seconds}]}` | session |
 | `rotate` | `rotate` `{orientation}` | session |
 | `flip` | `flip` `{side, front_src, back_src}` | session |
 | `increment` / `decrement` | `counter_value` `{value}` | session |
@@ -158,7 +160,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que cinq `kind` :
+`Session.load_session_components` ne reconnaît que sept `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
@@ -166,9 +168,11 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 | `board_group` | `BoardGroup` | `fixed` | 1 à n `board` retournés ensemble (voir § Groupe de plateaux) |
 | `counter` | `Counter` | `fixed` | compteur numérique ± (`min`/`max`/`color`) |
 | `dice` | `Dice` | `dice` | accepté dans les trois listes ; `origin_list` mémorise d'où il vient pour la sauvegarde |
-| `token` | `Token` | `movable` | uniquement s'il est déclaré dans `movable` |
+| `dice_pool` | `DicePool` | `fixed` | 1 à n `dice` lancés ensemble (voir § Groupe de dés) ; uniquement s'il est déclaré dans `fixed` |
+| `bag` | `Bag` | `fixed` | sac de pions tirés au hasard (voir § Sac) ; uniquement s'il est déclaré dans `fixed` |
+| `token` | `Token` | `movable` | uniquement s'il est déclaré dans `movable` (ou dans un `bag`) |
 
-`Bag`, `Card` et `Deck` existent et sont testés, mais **aucun `game_json` ne
+`Card` et `Deck` existent et sont testés, mais **aucun `game_json` ne
 peut les instancier** : ils sont absents du `match`. Un `kind` inconnu est
 ignoré sans erreur.
 
@@ -188,8 +192,8 @@ est notre **`Token`**, et son `CounterBox` est notre **`Counter`**.
    dans `handleServerMessage` de `game.ts`.
 
 Actions actuelles : `list_sessions`, `create_session`, `join_session`,
-`resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `move`,
-`roll`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
+`resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `pick`, `move`,
+`roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`.
 
 ## Configuration
@@ -233,6 +237,26 @@ lignes `[CHABANAS] Waiting for ...` du journal.
 exige qu'un pion soit *flippable* — c'est-à-dire qu'il possède une image de
 revers (`back_src`). `Token.flip()` délègue désormais à `set_side()` : passer
 par là plutôt que par une logique de face séparée.
+
+## Copies d'un pion (`copies`)
+
+Un `token` déclaré avec `"copies": n` dans un `game_json` de jeu est remplacé,
+à la construction de la session, par n pions identiques dont l'`id` est celui
+du pion déclaré suivi de `-01`, `-02`… (deux chiffres au moins, trois à partir
+de 100 copies). **Le pion déclaré n'est pas créé** : son `id` n'existe pas dans
+`components_dict`, et une entrée de `setup` qui le nomme est ignorée — viser
+`prep-fire-03`, pas `prep-fire`.
+
+- `session.expand_copies` / `expand_components`, appelés par
+  `load_session_components` et par `duplicate_component_ids` (un `id` de copie
+  qui heurte un `id` déclaré ailleurs fait refuser le jeu).
+- `copies` n'est **jamais sauvegardé** : `Token.return_json()` ne le renvoie
+  pas, l'état stocké contient les n pions ordinaires, et une reprise ne les
+  multiplie pas une seconde fois.
+- Un `copies` qui n'est pas un entier ≥ 1 (`0`, `"20"`, `true`…) est ignoré :
+  le pion est créé seul, sous son `id`.
+- Seuls les `token` sont copiés. Raffaillac ne voit jamais la clé : il reçoit
+  les copies comme des pions ordinaires.
 
 ## Grille hexagonale d'un plateau
 
@@ -295,6 +319,67 @@ groupe.
 - Un groupe sans aucun `board` est ignoré. Tout autre `kind` à l'intérieur est
   ignoré.
 - `duplicate_component_ids` compte aussi les `id` des plateaux d'un groupe.
+
+## Groupe de dés (`dice_pool`)
+
+Un `dice_pool` regroupe 1 à n dés qui se lancent ensemble. Il n'a ni image ni
+position : c'est un composant `fixed` transparent, qui dit seulement quels dés
+vont ensemble. Raffaillac dessine un bouton « roll » au-dessus de ses dés.
+
+```json
+{"kind": "dice_pool", "id": "combat", "dice": [
+  {"kind": "dice", "id": "red", "x": 100, "y": 100, "width": 90, "height": 90, "src_list": [...]},
+  {"kind": "dice", "id": "white", "x": 200, "y": 100, "width": 90, "height": 90, "src_list": [...]}]}
+```
+
+- Chaque dé du groupe est un `Dice` ordinaire, indexé par **son** `id` dans
+  `components_dict` : un clic le lance seul (`roll`) et le setup le déplace.
+  Il **n'est pas** dans `components_lists['dice']` : il vit dans son groupe,
+  qui le porte dans `fixed`, à l'écran comme dans l'état sauvegardé.
+- Le groupe **est** dans `components_dict` : l'action `roll_pool` le vise.
+- `roll_pool` lance **tout ou rien** : tant qu'un dé du groupe est dans son
+  délai, l'action est refusée (`dice_cooling_down`) et aucun dé ne bouge. Un
+  seul événement `roll_pool` porte toutes les faces tirées.
+- Un groupe sans aucun `dice` est ignoré, comme un groupe déclaré ailleurs que
+  dans `fixed`. Tout autre `kind` à l'intérieur est ignoré.
+- `duplicate_component_ids` compte l'`id` du groupe et ceux de ses dés.
+
+## Sac (`bag`)
+
+Un `bag` est un composant `fixed` qui contient des pions hors de vue. Un pion
+relâché dessus rejoint son contenu ; un clic en fait sortir un **au hasard**,
+directement dans la main du joueur.
+
+```json
+{"kind": "bag", "id": "chits", "x": 100, "y": 100, "width": 120, "height": 120,
+ "src": "/Games/Tools/Bag/bag.png", "components": [
+  {"kind": "token", "id": "chit-a", "x": null, "y": null, "width": 40, "height": 40,
+   "front_src": "...", "back_src": null}]}
+```
+
+- Chaque pion du sac est un `Token` ordinaire, indexé par **son** `id` dans
+  `components_dict`, mais il **n'est pas** dans `components_lists['movable']`
+  et ses `x`/`y` valent `None` tant qu'il n'est pas sorti (`Token.leave_table`
+  / `enter_table`). Le sac le porte dans `fixed`, à l'écran comme dans l'état
+  sauvegardé.
+- `pick` (`Session.pick_from_bag`) : mêmes conditions qu'`acquire`
+  (`acquire_refusal`). Le pion revient en fin de `movable`, centré sur le
+  point `x`/`y` envoyé par le client (à défaut, le centre du sac), et il est
+  acquis par l'appelant. Erreurs : `component_not_a_bag`, `bag_empty`.
+  `request_id` est renvoyé tel quel : deux joueurs peuvent tirer en même
+  temps, chaque client y reconnaît son pion.
+- Dépôt : dans `release`, `Session.bag_at` cherche le sac sous le **centre**
+  du pion ; il **prime** sur la grille et sur la case de départ. Le pion
+  quitte `movable` (`put_in_bag`) et l'événement `release` porte `bag_id`.
+- Un pion sorti d'un sac **n'a pas de case de départ** (`initial_x`/`initial_y`
+  à `None`, pas de rectangle vert) jusqu'au prochain « Fixe la position ».
+- `acquire` sur un pion encore dans un sac est refusé (`component_in_bag`).
+- Le setup déplace le sac ; sur un pion encore dans le sac, il ignore `x`/`y`
+  mais applique `side` (la face que le pion montrera en sortant).
+- `src` et `components` sont facultatifs : un sac peut être vide et se remplir
+  en cours de partie. Seuls les `token` y entrent (`copies` y est honoré) ;
+  tout autre `kind` est ignoré, comme un sac déclaré ailleurs que dans `fixed`.
+- `duplicate_component_ids` compte l'`id` du sac et ceux de ses pions.
 
 ## `game_json` et `setup`
 

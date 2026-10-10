@@ -1,10 +1,12 @@
 from unittest import loader
 
 from user import User
+from Components.bag import Bag
 from Components.board import Board
 from Components.board_group import BoardGroup
 from Components.counter import Counter, DEFAULT_COUNTER_COLOR
 from Components.dice import Dice
+from Components.dice_pool import DicePool
 from Components.token import Token
 
 import uuid
@@ -65,6 +67,42 @@ def read_setup(setup):
     return entries
 
 
+def expand_copies(component) -> list:
+    """
+    A token declared with "copies": n stands for n identical tokens: it is
+    replaced by n copies whose ids are the declared id followed by -01, -02...
+    The declared token itself is not created, and the copies do not carry
+    "copies", so a saved session stores them as ordinary tokens and a resumed
+    one does not multiply them again.
+    :param component: a component as the game_json declares it
+    :return: the copies, or the component alone when it asks for none. A
+        "copies" that is not an integer of at least 1 is ignored.
+    """
+    if not isinstance(component, dict) or component.get('kind') != 'token' or 'id' not in component:
+        return [component]
+    copies = component.get('copies')
+    # bool is an int in Python: true is a typing mistake, not one copy
+    if type(copies) is not int or copies < 1:
+        return [component]
+    # two digits at least, more when the game asks for 100 copies or more
+    digits = max(2, len(str(copies)))
+    expanded = []
+    for number in range(1, copies + 1):
+        copy = dict(component)
+        del copy['copies']
+        copy['id'] = f"{component['id']}-{number:0{digits}d}"
+        expanded.append(copy)
+    return expanded
+
+
+def expand_components(components: list) -> list:
+    """
+    The components of one list of a game_json, each token that asks for copies
+    replaced by them, in the order of declaration.
+    """
+    return [copy for component in components for copy in expand_copies(component)]
+
+
 def duplicate_component_ids(game_json: dict) -> list:
     """
     Lists the component ids a game_json declares more than once, across its
@@ -81,15 +119,25 @@ def duplicate_component_ids(game_json: dict) -> list:
         components = game_json.get(list_name) or []
         if not isinstance(components, list):
             continue
-        for component in components:
+        # the copies of a token take ids of their own, which may collide with
+        # an id the game declares elsewhere
+        for component in expand_components(components):
             if not isinstance(component, dict) or 'id' not in component:
                 continue
-            # the boards of a board_group are indexed by their own id, like a
-            # board declared alone: they share the same namespace
-            nested = component.get('boards') if component.get('kind') == 'board_group' else None
+            # the boards of a board_group, the dice of a dice_pool and the
+            # tokens of a bag are indexed by their own id, like a board, a dice
+            # or a token declared alone: they share the same namespace
+            nested = None
+            if component.get('kind') == 'board_group':
+                nested = component.get('boards')
+            elif component.get('kind') == 'dice_pool':
+                nested = component.get('dice')
+            elif component.get('kind') == 'bag' and isinstance(component.get('components'), list):
+                # the tokens of a bag may ask for copies too
+                nested = expand_components(component['components'])
             ids = [component['id']]
             if isinstance(nested, list):
-                ids += [board['id'] for board in nested if isinstance(board, dict) and 'id' in board]
+                ids += [item['id'] for item in nested if isinstance(item, dict) and 'id' in item]
             for component_id in ids:
                 if component_id in seen and component_id not in duplicates:
                     duplicates.append(component_id)
@@ -166,7 +214,8 @@ class Session:
         # un dé est accepté dans les trois listes : il n'est ni un plateau ni un
         # pion, donc l'endroit où le jeu le déclare ne regarde pas la session
         for list_name in ("fixed", "movable", "dice"):
-            for component in self.game_json.get(list_name, []):
+            # a token declared with "copies" is replaced by its copies
+            for component in expand_components(self.game_json.get(list_name, [])):
                 match component['kind']:
                     case 'board':
                         game_component = self.build_board(component)
@@ -202,50 +251,154 @@ class Session:
                         self.components_dict[component['id']] = game_component
                     case 'dice':
                         self.add_dice(component, list_name)
+                    case 'dice_pool' if list_name == 'fixed':
+                        game_component = self.build_dice_pool(component)
+                        if game_component is not None:
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                    case 'bag' if list_name == 'fixed':
+                        game_component = self.build_bag(component)
+                        self.components_lists["fixed"].append(game_component)
+                        self.components_dict[component['id']] = game_component
                     case 'token' if list_name == 'movable':
-                        # initial/in_place/orientation sont absents d'un game_json de
-                        # jeu : ils ne sont presents que si la session a ete reprise
-                        # apres une sauvegarde de la position courante.
-                        initial = None
-                        if 'initial_x' in component and 'initial_y' in component:
-                            initial = (component['initial_x'], component['initial_y'])
-                        game_component = Token(
-                            component['id'],
-                            component['x'],
-                            component['y'],
-                            component['front_src'],
-                            component['back_src'],
-                            component['width'],
-                            component['height'],
-                            component.get('move_border', True),
-                            initial,
-                            # border : le jeu demande-t-il une ombre sous ce
-                            # pion ? Rendu fige, independant des deplacements
-                            component.get('border'),
-                            # in_place : le rectangle vert, tel que la
-                            # sauvegarde l'a laisse ; absent, un pion
-                            # repositionnable commence sur sa case de depart
-                            component.get('in_place'),
-                            # orientable : le jeu autorise-t-il les zones de rotation
-                            component.get('orientable', False),
-                            # orientation : l'angle atteint avant la sauvegarde
-                            component.get('orientation', 0),
-                            # side : la face que le pion montrait avant la
-                            # sauvegarde ; absent d'un game_json de jeu, le
-                            # pion commence alors sur sa face
-                            component.get('side'),
-                            # origin : "transparent" fait afficher le fantome du
-                            # pion sur sa case d'origine
-                            component.get('origin'),
-                            # origin_x / origin_y : ou ce fantome est pose. Le jeu
-                            # ne les donne pas, ils ne sont la que sur une session
-                            # reprise apres une sauvegarde ; le Token retombe alors
-                            # sur le x/y qu'il avait a l'installation du jeu
-                            component.get('origin_x'),
-                            component.get('origin_y')
-                        )
+                        game_component = self.build_token(component)
                         self.components_lists['movable'].append(game_component)
                         self.components_dict[component['id']] = game_component
+
+    @staticmethod
+    def build_token(component: dict) -> Token:
+        """
+        Builds a token from its game_json description, whether it is declared
+        in "movable" or inside a bag.
+        :param component: the token description from the game_json
+        """
+        # initial/in_place/orientation sont absents d'un game_json de
+        # jeu : ils ne sont presents que si la session a ete reprise
+        # apres une sauvegarde de la position courante.
+        initial = None
+        if 'initial_x' in component and 'initial_y' in component:
+            initial = (component['initial_x'], component['initial_y'])
+        return Token(
+            component['id'],
+            component['x'],
+            component['y'],
+            component['front_src'],
+            component['back_src'],
+            component['width'],
+            component['height'],
+            component.get('move_border', True),
+            initial,
+            # border : le jeu demande-t-il une ombre sous ce
+            # pion ? Rendu fige, independant des deplacements
+            component.get('border'),
+            # in_place : le rectangle vert, tel que la
+            # sauvegarde l'a laisse ; absent, un pion
+            # repositionnable commence sur sa case de depart
+            component.get('in_place'),
+            # orientable : le jeu autorise-t-il les zones de rotation
+            component.get('orientable', False),
+            # orientation : l'angle atteint avant la sauvegarde
+            component.get('orientation', 0),
+            # side : la face que le pion montrait avant la
+            # sauvegarde ; absent d'un game_json de jeu, le
+            # pion commence alors sur sa face
+            component.get('side'),
+            # origin : "transparent" fait afficher le fantome du
+            # pion sur sa case d'origine
+            component.get('origin'),
+            # origin_x / origin_y : ou ce fantome est pose. Le jeu
+            # ne les donne pas, ils ne sont la que sur une session
+            # reprise apres une sauvegarde ; le Token retombe alors
+            # sur le x/y qu'il avait a l'installation du jeu
+            component.get('origin_x'),
+            component.get('origin_y')
+        )
+
+    def build_bag(self, component: dict) -> Bag:
+        """
+        Builds a bag and indexes each of its tokens by its own id. The tokens
+        stay inside the bag: they are not filed under "movable" until a player
+        picks them, the bag carries them in "fixed" and in the saved state.
+        A bag may be empty: players fill it during the game.
+        :param component: the bag description from the game_json
+        """
+        content = component.get('components')
+        tokens = [
+            self.build_token(item)
+            # a token of a bag may ask for copies, like one of "movable"
+            for item in expand_components(content if isinstance(content, list) else [])
+            # a bag only holds tokens: anything else is ignored, like an
+            # unknown kind in the "fixed" list
+            if isinstance(item, dict) and item.get('kind') == 'token'
+        ]
+        for token in tokens:
+            self.components_dict[token.id] = token
+        return Bag(
+            component['id'],
+            component['x'],
+            component['y'],
+            component['width'],
+            component['height'],
+            # src: the picture of the bag; without one the client draws a plain box
+            component.get('src'),
+            tokens
+        )
+
+    def bag_holding(self, component) -> Bag | None:
+        """
+        The bag a component is waiting in, or None when it is on the table.
+        """
+        for candidate in self.components_lists['fixed']:
+            if isinstance(candidate, Bag) and candidate.holds(component):
+                return candidate
+        return None
+
+    def bag_at(self, component, x, y) -> Bag | None:
+        """
+        The bag a token released at (x, y) falls into: the one its center lies
+        on. Bags are drawn in list order, so the last one under the point wins.
+        :param x: top-left corner of the token, as sent by the client
+        :return: the bag, or None when the token lands on the table
+        """
+        if getattr(component, 'kind', None) != 'token':
+            return None
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            return None
+        center_x = x + component.width / 2
+        center_y = y + component.height / 2
+        for candidate in reversed(self.components_lists['fixed']):
+            if isinstance(candidate, Bag) and candidate.contains(center_x, center_y):
+                return candidate
+        return None
+
+    def put_in_bag(self, bag: Bag, component):
+        """
+        Moves a token from the table into a bag: it leaves "movable" and loses
+        its position until somebody picks it.
+        """
+        movable = self.components_lists['movable']
+        if component in movable:
+            movable.remove(component)
+        bag.add(component)
+
+    def pick_from_bag(self, bag: Bag, user: User, x=None, y=None):
+        """
+        Takes a token out of a bag at random and puts it in the hand of user:
+        it comes back on the table, above the others, centered on (x, y).
+        :param x: where the player clicked; the center of the bag when the
+            client gives no usable point
+        :return: the token, or None when the bag is empty
+        """
+        token = bag.pick()
+        if token is None:
+            return None
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            x = bag.x + bag.width / 2
+            y = bag.y + bag.height / 2
+        token.enter_table(x - token.width / 2, y - token.height / 2)
+        self.components_lists['movable'].append(token)
+        token.acquire(user)
+        return token
 
     @staticmethod
     def build_board(component: dict) -> Board:
@@ -318,7 +471,20 @@ class Session:
         :param component: the dice description from the game_json
         :param list_name: "fixed", "movable" or "dice", where it was declared
         """
-        game_component = Dice(
+        game_component = self.build_dice(component, list_name)
+        self.components_lists['dice'].append(game_component)
+        self.components_dict[component['id']] = game_component
+        return game_component
+
+    @staticmethod
+    def build_dice(component: dict, list_name: str) -> Dice:
+        """
+        Builds a dice from its game_json description, whether it is declared
+        alone or inside a dice_pool.
+        :param component: the dice description from the game_json
+        :param list_name: the list of the game_json it was declared in
+        """
+        return Dice(
             component['id'],
             component['x'],
             component['y'],
@@ -327,13 +493,32 @@ class Session:
             component['height'],
             component['src_list'],
             list_name,
-            # delai de relance en secondes, propre au jeu ; absent du game_json
-            # c'est Dice qui applique son defaut
+            # delay between two rolls, in seconds, chosen by the game; when the
+            # game_json gives none, Dice applies its default
             component.get('roll_delay')
         )
-        self.components_lists['dice'].append(game_component)
-        self.components_dict[component['id']] = game_component
-        return game_component
+
+    def build_dice_pool(self, component: dict) -> DicePool | None:
+        """
+        Builds a dice_pool and indexes each of its dice by its own id: a click
+        rolls one of them alone and the setup moves it like a dice declared
+        outside a pool. The dice stay inside the pool: they are not filed
+        under "dice", the pool carries them in "fixed" and in the saved state.
+        :param component: the dice_pool description from the game_json
+        :return: the pool, or None when it holds no dice
+        """
+        dice = [
+            self.build_dice(item, 'fixed')
+            for item in component.get('dice') or []
+            # a pool only holds dice: anything else is ignored, like an
+            # unknown kind in the "fixed" list
+            if isinstance(item, dict) and item.get('kind') == 'dice'
+        ]
+        if not dice:
+            return None
+        for item in dice:
+            self.components_dict[item.id] = item
+        return DicePool(component['id'], dice)
 
     def game_json_state(self) -> dict:
         """
@@ -391,6 +576,9 @@ class Session:
         # the boards of a board_group are saved inside it
         if isinstance(saved.get('boards'), list):
             saved['boards'] = [Session._rounded_position(board) for board in saved['boards']]
+        # and so are the dice of a dice_pool
+        if isinstance(saved.get('dice'), list):
+            saved['dice'] = [Session._rounded_position(dice) for dice in saved['dice']]
         return saved
 
     def fix_positions_disabled(self) -> bool:
@@ -657,8 +845,11 @@ class Session:
                 continue
 
             moved = False
+            # a token inside a bag has no position: the setup may only choose
+            # the face it will show when it comes out
+            in_bag = self.bag_holding(component) is not None
             for field in SETUP_POSITION_FIELDS:
-                if field in entry:
+                if field in entry and not in_bag:
                     setattr(component, field, entry[field])
                     moved = True
 

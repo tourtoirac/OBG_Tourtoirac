@@ -382,6 +382,15 @@ def acquire(self, logger, message):
         return
 
     component_id = message["component_id"]
+    # a token inside a bag is out of reach: it only comes out through pick,
+    # which chooses it at random
+    if user.session.bag_holding(component) is not None:
+        self.send_error(
+            "component_in_bag",
+            f"Component {component_id} is inside a bag"
+        )
+        return
+
     acquired = component.acquire(user)
     acquire_message = {
                 "event": "acquire",
@@ -404,12 +413,21 @@ def release(self, logger, message):
     component_id = message["component_id"]
     # position de depot : le client l'envoie pour que le rectangle vert puisse
     # revenir si le jeton retrouve son emplacement initial
+    bag = None
     if "x" in message and "y" in message:
-        # on a board with a hex grid, the token is pulled onto the nearest hex
-        x, y = user.session.snap_to_grid(component, message["x"], message["y"])
-        component.place(x, y, user)
+        # a token released over a bag falls into it, whatever lies under the bag
+        bag = user.session.bag_at(component, message["x"], message["y"])
+        if bag is None:
+            # on a board with a hex grid, the token is pulled onto the nearest hex
+            x, y = user.session.snap_to_grid(component, message["x"], message["y"])
+            component.place(x, y, user)
     released = component.release(user)
-    if released:
+    if not released:
+        bag = None
+    elif bag is not None:
+        # the token joins the content of the bag: it leaves the table
+        user.session.put_in_bag(bag, component)
+    else:
         # un pion relâché se pose au-dessus de la pile : il repasse en fin de
         # liste, l'ordre que le client dessine et que la sauvegarde conserve
         user.session.bring_to_front(component)
@@ -417,11 +435,64 @@ def release(self, logger, message):
                 "event": "release",
                 "component_id" : component_id,
                 "component_json" : component.return_json(),
+                # the bag the token fell into, None when it stays on the table
+                "bag_id": bag.id if bag is not None else None,
                 "user": user.id,
                 "success": bool(released),
             }
     logger.debug(release_message)
     user.session.send(release_message)
+
+
+def pick(self, logger, message):
+    """
+    Takes a token out of a bag. The client only says which bag it clicked and
+    where: the server chooses the token at random, puts it back on the table
+    under the pointer and in the hand of the player, as an acquire would.
+    """
+    logger.debug("Process pick message")
+    user, component, ready = resolve_component_action(
+        self, message, "pick", ["component_id"]
+    )
+    if not ready:
+        return
+
+    # the picked token lands in the hand of the player: same conditions as
+    # taking a token from the table
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return
+
+    component_id = message["component_id"]
+    if component.kind != 'bag':
+        self.send_error(
+            "component_not_a_bag",
+            f"Component {component_id} is not a bag"
+        )
+        return
+
+    request_id = message.get("request_id")
+    token = user.session.pick_from_bag(component, user, message.get("x"), message.get("y"))
+    if token is None:
+        self.send_error("bag_empty", f"Bag {component_id} is empty")
+        return
+
+    # sent to everyone: each screen takes the token out of its bag and shows
+    # it in the hand of the player who picked it
+    user.session.send({
+        "event": "pick",
+        "component_id": component_id,
+        "user": user.id,
+        # echoed as is: two players may pick from the same bag at once, and
+        # each client must tell its own token from the other's
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "component_json": token.return_json(),
+    })
 
 
 def move(self, logger, message):
@@ -480,6 +551,43 @@ def roll(self, logger, message):
         "component_id": component_id,
         "src": src,
         "cooldown_seconds": component.roll_cooldown(),
+    })
+
+
+def roll_pool(self, logger, message):
+    """
+    Rolls every dice of a dice_pool at once. The pool is thrown as a whole: as
+    long as one of its dice is cooling down, nothing is rolled.
+    """
+    logger.debug("Process roll_pool message")
+    user, component, ready = resolve_component_action(
+        self, message, "roll_pool", ["component_id"]
+    )
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    if component.kind != 'dice_pool':
+        self.send_error(
+            "component_not_a_dice_pool",
+            f"Component {component_id} is not a dice pool"
+        )
+        return
+
+    # the delay is enforced here, on the server, as it is for a single dice
+    if not component.is_rolling_allowed():
+        self.send_error(
+            "dice_cooling_down",
+            f"A dice of {component_id} is still cooling down"
+        )
+        return
+
+    # one message for the whole throw: every screen shows all the faces at
+    # the same time
+    user.session.send({
+        "event": "roll_pool",
+        "component_id": component_id,
+        "dice": component.roll(),
     })
 
 

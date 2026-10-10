@@ -12,7 +12,7 @@ from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, move, roll, rotate, flip, fix_positions, apply_setup, increment, decrement
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, move, roll, roll_pool, rotate, flip, fix_positions, apply_setup, increment, decrement
 from lobby import Lobby
 from user import User
 
@@ -98,10 +98,14 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 acquire(self, self.factory.lobby.logger, message)
             case "release": # release a component from a user
                 release(self, self.factory.lobby.logger, message)
+            case "pick": # a player takes a random token out of a bag
+                pick(self, self.factory.lobby.logger, message)
             case "move": # change the x and y value of a component
                 move(self, self.factory.lobby.logger, message)
             case "roll": # players launch a dice and everyone sees the new face
                 roll(self, self.factory.lobby.logger, message)
+            case "roll_pool": # players launch every dice of a dice pool at once
+                roll_pool(self, self.factory.lobby.logger, message)
             case "rotate": # a player turns an orientable token, everyone sees the new angle
                 rotate(self, self.factory.lobby.logger, message)
             case "increment": # a player raises a counter, everyone sees the new value

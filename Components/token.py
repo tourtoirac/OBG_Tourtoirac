@@ -87,7 +87,29 @@ class Token (Component):
         # Un pion non repositionnable n'affiche jamais le rectangle vert.
         if in_place is None:
             in_place = move_border
-        self.in_place = bool(in_place) and move_border
+        # a token waiting inside a bag has no starting square to stand on
+        self.in_place = bool(in_place) and move_border and self.initial_x is not None
+
+    def leave_table(self):
+        """
+        The token goes into a bag: it has no position any more, and nothing of
+        the square it came from. Its face and its orientation are kept.
+        """
+        self.x = None
+        self.y = None
+        self.coordinates = (None, None)
+        self.initial_x = None
+        self.initial_y = None
+        self.in_place = False
+
+    def enter_table(self, x, y):
+        """
+        The token comes out of a bag at (x, y). It gets no starting square:
+        only "fix positions" gives it one, like any token moved during the game.
+        """
+        self.x = x
+        self.y = y
+        self.coordinates = (x, y)
 
     def rotatable(self) -> bool:
         return self.orientable
@@ -120,6 +142,9 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
         déplacent la case de retour : c'est le repère du plateau qui bouge, pas
         le pion.
         """
+        # a token drawn from a bag has no starting square to go back to
+        if self.initial_x is None or self.initial_y is None:
+            return False
         dx = x - self.initial_x
         dy = y - self.initial_y
         if dx * dx + dy * dy <= MOVE_THRESHOLD * MOVE_THRESHOLD:
