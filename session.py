@@ -70,6 +70,66 @@ def read_setup(setup):
     return entries
 
 
+# what a builder raises on a component the game_json describes wrongly: a
+# missing field, a description that is not an object, a value of the wrong type
+COMPONENT_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+
+
+class InvalidComponentError(Exception):
+    """
+    A component of a game_json cannot be built. Carries what is needed to find
+    it in the game_json: its id and kind when it has them, the list it was
+    declared in, the component holding it (bag, board_group, dice_pool) and
+    the field that is missing.
+    """
+
+    def __init__(self, component, list_name: str, error: Exception, parent_id=None):
+        described = component if isinstance(component, dict) else {}
+        self.component_id = described.get('id')
+        self.kind = described.get('kind')
+        self.list_name = list_name
+        self.parent_id = parent_id
+        # a KeyError names the field the builder could not read
+        self.missing_field = error.args[0] if isinstance(error, KeyError) and error.args else None
+        if self.missing_field is not None:
+            self.problem = f"missing field '{self.missing_field}'"
+        elif not isinstance(component, dict):
+            self.problem = "the component is not a JSON object"
+        else:
+            self.problem = f"{type(error).__name__}: {error}"
+        super().__init__(self.describe())
+
+    def describe(self) -> str:
+        name = f"'{self.component_id}'" if self.component_id is not None else "without id"
+        where = f'list "{self.list_name}"'
+        if self.parent_id is not None:
+            where += f", inside '{self.parent_id}'"
+        return f"Component {name} ({self.kind or 'unknown kind'}, {where}): {self.problem}"
+
+    def details(self) -> dict:
+        """What the error event carries besides its message."""
+        return {
+            "component_id": self.component_id,
+            "kind": self.kind,
+            "list": self.list_name,
+            "parent_id": self.parent_id,
+            "missing_field": self.missing_field,
+        }
+
+
+def build_checked(builder, component, list_name: str, parent_id=None):
+    """
+    Runs a component builder and turns its failure into an
+    InvalidComponentError naming the component.
+    """
+    try:
+        return builder(component)
+    except InvalidComponentError:
+        raise
+    except COMPONENT_ERRORS as error:
+        raise InvalidComponentError(component, list_name, error, parent_id) from error
+
+
 def read_nationalities(game_json) -> list:
     """
     Reads the optional "nationalities" key of the options of a game_json: the
@@ -309,54 +369,61 @@ class Session:
         for list_name in ("fixed", "movable", "dice"):
             # a token declared with "copies" is replaced by its copies
             for component in expand_components(self.game_json.get(list_name, [])):
-                match component['kind']:
-                    case 'board':
-                        game_component = self.build_board(component)
-                        self.components_lists["fixed"].append(game_component)
-                        self.components_dict[component['id']] = game_component
-                    case 'board_group':
-                        game_component = self.build_board_group(component)
-                        if game_component is not None:
-                            self.components_lists["fixed"].append(game_component)
-                    case 'counter':
-                        # un compteur est fige comme un plateau, mais cliquable :
-                        # le client dessine son fond et ses deux zones + et -
-                        game_component = Counter(
-                            component['id'],
-                            component['x'],
-                            component['y'],
-                            component['width'],
-                            component['height'],
-                            # color et value : absents d'un jeu qui les oublie,
-                            # le compteur s'affiche alors sans fond, a zero
-                            component.get('color', DEFAULT_COUNTER_COLOR),
-                            component.get('value', 0),
-                            # font_color : absent, le chiffre prend une couleur
-                            # lisible sur le fond
-                            component.get('font_color'),
-                            # min et max : absents ou null, la valeur est libre de
-                            # ce cote ; presents, le serveur refuse de sortir de la
-                            # plage et le client grise le signe devenu impossible
-                            component.get('min'),
-                            component.get('max')
-                        )
-                        self.components_lists["fixed"].append(game_component)
-                        self.components_dict[component['id']] = game_component
-                    case 'dice':
-                        self.add_dice(component, list_name)
-                    case 'dice_pool' if list_name == 'fixed':
-                        game_component = self.build_dice_pool(component)
-                        if game_component is not None:
+                # a component the game describes wrongly stops the build with
+                # an error that names it
+                try:
+                    match component['kind']:
+                        case 'board':
+                            game_component = self.build_board(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
-                    case 'bag' if list_name == 'fixed':
-                        game_component = self.build_bag(component)
-                        self.components_lists["fixed"].append(game_component)
-                        self.components_dict[component['id']] = game_component
-                    case 'token' if list_name == 'movable':
-                        game_component = self.build_token(component)
-                        self.components_lists['movable'].append(game_component)
-                        self.components_dict[component['id']] = game_component
+                        case 'board_group':
+                            game_component = self.build_board_group(component)
+                            if game_component is not None:
+                                self.components_lists["fixed"].append(game_component)
+                        case 'counter':
+                            # un compteur est fige comme un plateau, mais cliquable :
+                            # le client dessine son fond et ses deux zones + et -
+                            game_component = Counter(
+                                component['id'],
+                                component['x'],
+                                component['y'],
+                                component['width'],
+                                component['height'],
+                                # color et value : absents d'un jeu qui les oublie,
+                                # le compteur s'affiche alors sans fond, a zero
+                                component.get('color', DEFAULT_COUNTER_COLOR),
+                                component.get('value', 0),
+                                # font_color : absent, le chiffre prend une couleur
+                                # lisible sur le fond
+                                component.get('font_color'),
+                                # min et max : absents ou null, la valeur est libre de
+                                # ce cote ; presents, le serveur refuse de sortir de la
+                                # plage et le client grise le signe devenu impossible
+                                component.get('min'),
+                                component.get('max')
+                            )
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                        case 'dice':
+                            self.add_dice(component, list_name)
+                        case 'dice_pool' if list_name == 'fixed':
+                            game_component = self.build_dice_pool(component)
+                            if game_component is not None:
+                                self.components_lists["fixed"].append(game_component)
+                                self.components_dict[component['id']] = game_component
+                        case 'bag' if list_name == 'fixed':
+                            game_component = self.build_bag(component)
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                        case 'token' if list_name == 'movable':
+                            game_component = self.build_token(component)
+                            self.components_lists['movable'].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                except InvalidComponentError:
+                    raise
+                except COMPONENT_ERRORS as error:
+                    raise InvalidComponentError(component, list_name, error) from error
 
     @staticmethod
     def build_token(component: dict) -> Token:
@@ -419,7 +486,7 @@ class Session:
         """
         content = component.get('components')
         tokens = [
-            self.build_token(item)
+            build_checked(self.build_token, item, 'fixed', component.get('id'))
             # a token of a bag may ask for copies, like one of "movable"
             for item in expand_components(content if isinstance(content, list) else [])
             # a bag only holds tokens: anything else is ignored, like an
@@ -436,7 +503,11 @@ class Session:
             component['height'],
             # src: the picture of the bag; without one the client draws a plain box
             component.get('src'),
-            tokens
+            tokens,
+            # text: optional caption shown under the bag
+            component.get('text'),
+            # count: true shows the number of tokens left in the bag
+            component.get('count', False)
         )
 
     def bag_holding(self, component) -> Bag | None:
@@ -525,7 +596,7 @@ class Session:
         :return: the group, or None when it holds no board
         """
         boards = [
-            self.build_board(item)
+            build_checked(self.build_board, item, 'fixed', component.get('id'))
             for item in component.get('boards') or []
             # a group only holds boards: anything else is ignored, like an
             # unknown kind in the "fixed" list
@@ -604,7 +675,10 @@ class Session:
         :return: the pool, or None when it holds no dice
         """
         dice = [
-            self.build_dice(item, 'fixed')
+            build_checked(
+                lambda described: self.build_dice(described, 'fixed'),
+                item, 'fixed', component.get('id')
+            )
             for item in component.get('dice') or []
             # a pool only holds dice: anything else is ignored, like an
             # unknown kind in the "fixed" list

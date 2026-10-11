@@ -4,7 +4,7 @@ import uuid
 from twisted.internet import defer
 
 from chabanas import Chabanas
-from session import Session, duplicate_component_ids
+from session import InvalidComponentError, Session, duplicate_component_ids
 from user import User
 
 
@@ -183,7 +183,19 @@ class Lobby:
                 )
             return False, "duplicate_component_ids"
 
-        session = self._build_session(session_info)
+        try:
+            session = self._build_session(session_info)
+        except InvalidComponentError as error:
+            # same fate as duplicated ids: the session Chabanas has just
+            # created cannot be played. The error goes on to the handler,
+            # which tells the caller which component is at fault
+            self.logger.error(f"Game {game_name} refused: {error}")
+            archived = yield self.chabanas.archive_session(session_info["key"])
+            if not archived:
+                self.logger.error(
+                    f"Unable to archive refused session {session_info['key']}"
+                )
+            raise
         self.add_session(session)
 
         success, reason = session.add_user(user, "player")

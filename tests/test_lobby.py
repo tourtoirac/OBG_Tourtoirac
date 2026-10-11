@@ -6,7 +6,7 @@ from twisted.internet import defer
 
 from chabanas import Chabanas
 from lobby import Lobby
-from session import Session, duplicate_component_ids
+from session import InvalidComponentError, Session, duplicate_component_ids
 from user import User
 
 LOGGER = logging.getLogger("tests")
@@ -157,6 +157,74 @@ class TestCreateSession:
             sync(lobby.join_session(session_info["code"], user, "key"))
 
         assert "duplicated component ids ['b1']" in caplog.text
+
+    def test_a_component_missing_a_field_refuses_the_game(self, lobby, sync, session_info):
+        """The error names the component and the field, and the session is archived."""
+        del lobby.chabanas.info["game_json"]["movable"][0]["height"]
+        user = connect(lobby, "alice")
+
+        with pytest.raises(InvalidComponentError) as raised:
+            sync(lobby.create_session("Waterloo", user, "key"))
+
+        error = raised.value
+        assert error.details() == {
+            "component_id": "t1",
+            "kind": "token",
+            "list": "movable",
+            "parent_id": None,
+            "missing_field": "height",
+        }
+        assert str(error) == (
+            "Component 't1' (token, list \"movable\"): missing field 'height'"
+        )
+        assert user.session is None
+        assert lobby.sessions == {}
+        assert ("/session/archive", {"key": "KEY1"}) in lobby.chabanas.payloads
+
+    def test_a_broken_stored_session_is_reported_on_join(self, lobby, sync, session_info):
+        del lobby.chabanas.info["game_json"]["fixed"][0]["src"]
+        user = connect(lobby, "alice")
+
+        with pytest.raises(InvalidComponentError) as raised:
+            sync(lobby.join_session(session_info["code"], user, "key"))
+
+        assert raised.value.component_id == "b1"
+        assert raised.value.missing_field == "src"
+        assert lobby.sessions == {}
+
+
+class TestInvalidComponentError:
+    def test_a_token_inside_a_bag_names_its_bag(self):
+        game_json = {
+            "game": {"max_players": 2, "max_watchers": 1},
+            "fixed": [{
+                "kind": "bag", "id": "bag1", "x": 0, "y": 0, "width": 10, "height": 10,
+                "components": [{"kind": "token", "id": "t9", "x": 0, "y": 0}],
+            }],
+        }
+        with pytest.raises(InvalidComponentError) as raised:
+            Session(None, "Waterloo", "KEY1", "CODE1", True, None, game_json)
+
+        error = raised.value
+        assert (error.component_id, error.parent_id, error.list_name) == ("t9", "bag1", "fixed")
+        assert error.missing_field == "front_src"
+
+    def test_a_component_without_kind_or_id(self):
+        game_json = {"game": {"max_players": 2, "max_watchers": 1}, "movable": [{"x": 0}]}
+        with pytest.raises(InvalidComponentError) as raised:
+            Session(None, "Waterloo", "KEY1", "CODE1", True, None, game_json)
+
+        assert raised.value.missing_field == "kind"
+        assert str(raised.value) == (
+            "Component without id (unknown kind, list \"movable\"): missing field 'kind'"
+        )
+
+    def test_a_component_that_is_not_an_object(self):
+        game_json = {"game": {"max_players": 2, "max_watchers": 1}, "fixed": ["board"]}
+        with pytest.raises(InvalidComponentError) as raised:
+            Session(None, "Waterloo", "KEY1", "CODE1", True, None, game_json)
+
+        assert raised.value.problem == "the component is not a JSON object"
 
 
 class TestDuplicateComponentIds:

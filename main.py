@@ -13,6 +13,7 @@ from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
 from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, move, roll, roll_pool, rotate, flip, fix_positions, apply_setup, increment, decrement
+from session import InvalidComponentError
 from lobby import Lobby
 from user import User
 
@@ -129,6 +130,13 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
             result.addErrback(self.log_handler_error, action)
 
     def log_handler_error(self, failure, action):
+        # a game_json describing a component wrongly: the session cannot be
+        # built, and the caller is told which component to fix
+        if failure.check(InvalidComponentError):
+            error = failure.value
+            logger.error(f"[HANDLER] Action '{action}' failed: {error}")
+            self.send_error("invalid_component", str(error), error.details())
+            return
         logger.error(f"[HANDLER] Action '{action}' failed: {failure}")
 
     def is_connection_open(self):
@@ -139,7 +147,7 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
         """
         return self.state == WebSocketProtocol.STATE_OPEN
 
-    def send_error(self, code, message):
+    def send_error(self, code, message, details=None):
         if not self.is_connection_open():
             return
         payload = {
@@ -149,6 +157,9 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "message": message
             }
         }
+        # details: optional extra fields of the error, next to code and message
+        if details:
+            payload["error"].update(details)
         encoded = json.dumps(payload).encode("utf-8")
         self.sendMessage(
             encoded,

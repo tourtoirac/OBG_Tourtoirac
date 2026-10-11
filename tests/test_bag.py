@@ -115,6 +115,23 @@ class TestLoading:
         bag = {key: value for key, value in BAG.items() if key != "src"}
         assert build_session(bag).get_component("bag").src is None
 
+    def test_a_bag_carries_its_text_to_the_clients_and_the_saved_state(self):
+        session = build_session(dict(BAG, text="Chits"))
+        assert session.get_component("bag").return_json()["text"] == "Chits"
+        saved = [item for item in session.game_json_state()["fixed"] if item["id"] == "bag"]
+        assert saved[0]["text"] == "Chits"
+
+    @pytest.mark.parametrize("declared, expected", [(True, True), (False, False), ("true", False), (1, False)])
+    def test_only_count_true_shows_the_number_of_tokens(self, declared, expected):
+        session = build_session(dict(BAG, count=declared))
+        assert session.get_component("bag").return_json()["count"] is expected
+
+    def test_a_bag_without_count_hides_the_number_of_tokens(self):
+        assert build_session().get_component("bag").return_json()["count"] is False
+
+    def test_a_bag_without_text_has_none(self):
+        assert build_session().get_component("bag").return_json()["text"] is None
+
     def test_a_bag_only_holds_tokens(self):
         dice = {"kind": "dice", "id": "red", "x": 0, "y": 0, "width": 9, "height": 9, "src_list": ["/1.png"]}
         session = build_session(dict(BAG, components=[dice, CHIT_A]))

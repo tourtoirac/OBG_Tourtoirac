@@ -92,7 +92,8 @@ par `self.factory.lobby.get_user(self)`.
    tous (joueurs **et** spectateurs, émetteur compris), ou répond au seul
    appelant par `user.send(...)`.
 4. Une erreur repart sous la forme `{"event": "error", "error": {code, message}}`
-   via `self.send_error`.
+   via `self.send_error`, dont le troisième argument facultatif ajoute des
+   champs au bloc `error` (utilisé par `invalid_component`).
 
 Les handlers qui parlent à Chabanas sont des `@defer.inlineCallbacks` ; `main.py`
 leur attache un errback de journalisation.
@@ -136,6 +137,16 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
   `duplicate_component_ids`, affichée par `lobby.ts`.
   Une session déjà stockée (adhésion, reprise) n'est pas refusée :
   `_build_session` journalise seulement ses ids en double, en `ERROR`.
+- **Composant mal décrit** : un champ obligatoire absent (`height`, `src`…)
+  ou une description qui n'est pas un objet fait lever
+  `session.InvalidComponentError` pendant `load_session_components`. Elle
+  nomme le composant (`id`, `kind`, liste, conteneur `bag` / `board_group` /
+  `dice_pool`) et le champ manquant. `main.log_handler_error` la renvoie à
+  l'appelant en erreur `invalid_component`, dont le bloc `error` porte en plus
+  `component_id`, `kind`, `list`, `parent_id`, `missing_field`. À la création,
+  la session que Chabanas vient de créer est archivée ; à l'adhésion et à la
+  reprise, la session stockée reste telle quelle. Les autres exceptions d'un
+  handler ne sont toujours que journalisées.
 - **Passage lobby → jeu** : ce sont deux pages, donc deux WebSocket. La
   fermeture de la connexion du lobby peut vider la session. `lobby.delete_user`
   appelle alors `_save_state_if_empty`, qui envoie `game_json_state()` à
@@ -448,6 +459,12 @@ directement dans la main du joueur.
    "front_src": "...", "back_src": null}]}
 ```
 
+- `count` (facultatif) : seul `true` fait afficher par le client la pastille
+  du nombre de pions restants ; absent ou autre valeur, elle n'est pas
+  dessinée (`Bag.count`, renvoyé par `return_json`).
+- `text` (facultatif) : légende que le client écrit **sous** le sac ; absent,
+  `null` ou vide, rien n'est écrit. Le serveur ne fait que le transporter
+  (`Bag.text`, renvoyé par `return_json`, donc conservé dans l'état sauvegardé).
 - Chaque pion du sac est un `Token` ordinaire, indexé par **son** `id` dans
   `components_dict`, mais il **n'est pas** dans `components_lists['movable']`
   et ses `x`/`y` valent `None` tant qu'il n'est pas sorti (`Token.leave_table`

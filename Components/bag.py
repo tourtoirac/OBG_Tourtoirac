@@ -13,7 +13,7 @@ class Bag(Component):
     it is on no list of the table and has no position: its x and y are None
     until it is picked.
     """
-    def __init__(self, component_id, x, y, width, height, image_src, components=None):
+    def __init__(self, component_id, x, y, width, height, image_src, components=None, text=None, count=False):
         super().__init__(component_id)
         self.kind = 'bag'
         self.x = x
@@ -22,6 +22,12 @@ class Bag(Component):
         self.width = width
         self.height = height
         self.coordinates = (x, y)
+        # text: optional caption the client writes under the bag; the server
+        # only carries it
+        self.text = text
+        # count: does the client show how many tokens the bag holds ? Only
+        # when the game says true
+        self.count = count is True
         self.components = []
         for component in components or []:
             self.add(component)
@@ -68,5 +74,7 @@ class Bag(Component):
             "src": self.src,
             "width": self.width,
             "height": self.height,
+            "text": self.text,
+            "count": self.count,
             "components": [component.return_json() for component in self.components]
         }
