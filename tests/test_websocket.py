@@ -409,6 +409,18 @@ class TestErrorReporting:
         assert client.closed is False, "la connexion doit survivre"
 
 
+class TestPing:
+    """The WebSocket ping/pong replaces the former `keep_alive` message."""
+
+    def test_the_factory_pings_every_connection(self):
+        factory = GameWebSocketFactory("ws://127.0.0.1:9000", lobby=None)
+
+        assert factory.autoPingInterval == main_module.WS_PING_INTERVAL
+        assert factory.autoPingTimeout == main_module.WS_PING_TIMEOUT
+        # a client that stops answering must be dropped, not kept for ever
+        assert 0 < factory.autoPingTimeout < factory.autoPingInterval
+
+
 class TestConnectionLifecycle:
     def test_on_close_removes_the_user(self, lobby, client, session_info):
         receive(client, {

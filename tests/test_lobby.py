@@ -398,44 +398,6 @@ class TestSessionBasics:
         assert session.watchers == []
 
 
-class TestKeepAlive:
-    """
-    Bug 6: send_keep_alive deleted users while iterating self.users.values(),
-           raising RuntimeError: dictionary changed size during iteration and
-           stopping the reactor.
-    """
-
-    def test_keeps_sending_to_live_users(self, lobby):
-        alive = connect(lobby, "alive")
-
-        lobby.send_keep_alive()
-
-        assert len(alive.protocol.sent) == 1
-        assert b"keep_alive" in alive.protocol.sent[0]
-
-    def test_removes_dead_users_without_raising(self, lobby):
-        alive = connect(lobby, "alive")
-        dead = connect(lobby, "dead")
-        dead.protocol._raise_on_send = True
-
-        lobby.send_keep_alive()  # must not raise
-
-        assert dead.protocol not in lobby.users
-        assert alive.protocol in lobby.users
-        assert len(alive.protocol.sent) == 1, "les autres clients recoivent le message"
-
-    def test_handles_several_dead_users(self, lobby):
-        alive = connect(lobby, "alive")
-        for index in range(5):
-            zombie = connect(lobby, f"zombie{index}")
-            zombie.protocol._raise_on_send = True
-
-        lobby.send_keep_alive()
-
-        assert len(lobby.users) == 1
-        assert alive.protocol in lobby.users
-
-
 class TestDeleteUser:
     """Bug 7: shutdown() clears the user registry before the close handshakes
     finish, so onClose() then called delete_user(None)."""
@@ -1203,9 +1165,3 @@ class TestShutdown:
         assert b"server_shutdown" in second.protocol.sent[0]
         assert first.protocol.closed and second.protocol.closed
 
-    def test_keep_alive_after_shutdown_is_harmless(self, lobby, sync):
-        first = connect(lobby, "alice")
-        sync(lobby.create_session("Waterloo", first, ""))
-        lobby.shutdown()
-
-        lobby.send_keep_alive()  # must not raise

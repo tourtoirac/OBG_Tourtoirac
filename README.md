@@ -16,7 +16,7 @@ Useful variations:
 
 ```bash
 poetry run pytest tests/test_chabanas.py        # a single file
-poetry run pytest -k keep_alive                 # by keyword
+poetry run pytest -k shutdown                   # by keyword
 poetry run pytest -q                            # quiet
 ```
 

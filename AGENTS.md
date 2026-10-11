@@ -119,7 +119,6 @@ leur attache un errback de journalisation.
 | `increment` / `decrement` | `counter_value` `{value}` | session |
 | `fix_positions` | `fix_positions` `{components}` | session |
 | `apply_setup` | `setup` `{components}` | session |
-| (minuterie 30 s) | `keep_alive` | tous |
 | (arrêt du réacteur) | `server_shutdown` | tous |
 
 Le client attend aussi `session_created`, que le serveur n'émet jamais.
@@ -205,7 +204,7 @@ configuration réelle est en dur dans le code :
 | Valeur | Où | Valeur actuelle |
 | ------ | -- | --------------- |
 | Écoute WebSocket | `main.py`, `start_server()` | `ws://0.0.0.0:9000` |
-| Période du keep-alive | `main.py`, `start_server()` | `30.0` s |
+| Ping WebSocket | `main.py`, `WS_PING_INTERVAL` / `WS_PING_TIMEOUT` | ping toutes les 30 s, pong attendu 10 s |
 | Attente de Chabanas | `main.py`, `CHABANAS_MAX_RETRIES` / `CHABANAS_RETRY_INTERVAL` | 30 essais, 2 s |
 | URL de Chabanas | `chabanas.py`, `Chabanas.__init__` | `http://obg-chabanas:80` |
 | Délai HTTP | `chabanas.py`, `Chabanas.__init__` | `10.0` s |
@@ -221,8 +220,8 @@ de Chabanas (jeux `active`) : `list_game` et `list_sessions` n'attendent aucun
 réacteur démarré, `Chabanas.wait_until_ready()` interroge `/game/list` (avec
 une liste vide) jusqu'à recevoir un 200 :
 
-- dès que Chabanas répond, `start_server()` ouvre le WebSocket, lance le
-  keep-alive et enregistre l'arrêt propre ;
+- dès que Chabanas répond, `start_server()` ouvre le WebSocket et enregistre
+  l'arrêt propre ;
 - après `CHABANAS_MAX_RETRIES` échecs, le réacteur s'arrête et le processus
   sort avec le code 1, sans avoir jamais écouté.
 

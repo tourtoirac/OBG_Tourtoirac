@@ -8,7 +8,7 @@ from autobahn.twisted.websocket import (
     listenWS,
 )
 from autobahn.websocket.protocol import WebSocketProtocol
-from twisted.internet import reactor, task
+from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
@@ -167,11 +167,22 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
             user
         )
 
+# WebSocket ping/pong, sent by autobahn on every connection. It keeps an idle
+# connection open through proxies and routers, and a client that no longer
+# answers is dropped: onClose then removes its user from the lobby.
+WS_PING_INTERVAL = 30  # seconds between two pings
+WS_PING_TIMEOUT = 10   # seconds to wait for the pong before closing
+
+
 class GameWebSocketFactory(WebSocketServerFactory):
     protocol = GameWebSocketProtocol
     def __init__(self, url, lobby):
         super().__init__(url)
         self.lobby = lobby
+        self.setProtocolOptions(
+            autoPingInterval=WS_PING_INTERVAL,
+            autoPingTimeout=WS_PING_TIMEOUT,
+        )
 
 
 def create_lobby(logger, chabanas):
@@ -187,12 +198,6 @@ def start_server(lobby):
     )
     listenWS(factory)
     logger.info("WebSocket server started on ws://0.0.0.0:9000")
-
-    keep_alive_loop = task.LoopingCall(
-        lobby.send_keep_alive
-    )
-
-    keep_alive_loop.start(30.0)
 
     # Graceful shutdown : on SIGTERM/SIGINT, the Twisted reactor stops,
     # notify all users and disconnect them before the process exits

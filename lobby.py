@@ -518,21 +518,3 @@ class Lobby:
         self.sessions.clear()
         self.logger.info("[SERVER] All users disconnected")
 
-    def send_keep_alive(self):
-        self.logger.debug("Sending keep alive message")
-        message = {
-            "event": "keep_alive"
-        }
-        encoded = json.dumps(message).encode("utf-8")
-        # delete_user() below mutates self.users, so iterate over a copy
-        for user in list(self.users.values()):
-            try:
-                user.protocol.sendMessage(
-                    encoded,
-                    isBinary=False
-                )
-            except Exception as error:
-                self.logger.error(
-                    f"[KEEP_ALIVE] Error sending message to {user.name}: {error}"
-                )
-                self.delete_user(user)
