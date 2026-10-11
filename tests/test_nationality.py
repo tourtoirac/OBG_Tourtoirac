@@ -6,7 +6,7 @@ to the clients. No rule depends on it yet.
 """
 import json
 
-from handle_message import acquire, pick
+from handle_message import acquire, apply_setup, flip, pick, release, rotate
 from session import Session, read_nationalities
 from tests.test_bag import FakeProtocol, FakeUser, call, error_codes
 from tests.test_lobby import FakeChabanas, LOGGER, connect
@@ -200,3 +200,175 @@ class TestPickRule:
         assert error_codes(protocol) == ["wrong_nationality"]
         assert [token.id for token in session.get_component("bag").components] == ["us-chit"]
         assert len(user.sent) == 1
+
+
+class TestModificationRules:
+    """Whatever forbids taking a token forbids turning and flipping it too."""
+
+    FLIPPABLE = dict(TOKEN, id="unit", nationality="US", back_src="/back.png", orientable=True)
+
+    def session(self, **extra):
+        return build_session({"movable": [self.FLIPPABLE]}, started=True, **extra)
+
+    def test_a_player_of_the_nationality_turns_and_flips_the_token(self):
+        session = self.session()
+        protocol, user = player(session, "US")
+        call(rotate, protocol, "unit", direction="right")
+        call(flip, protocol, "unit")
+        assert error_codes(protocol) == []
+        unit = session.get_component("unit")
+        assert (unit.orientation, unit.side) == (45, "back")
+        assert [message["event"] for message in user.sent] == ["rotate", "flip"]
+
+    def test_a_player_of_another_nationality_does_neither(self):
+        session = self.session()
+        protocol, user = player(session, "NVA")
+        call(rotate, protocol, "unit", direction="right")
+        call(flip, protocol, "unit")
+        assert error_codes(protocol) == ["wrong_nationality", "wrong_nationality"]
+        unit = session.get_component("unit")
+        assert (unit.orientation, unit.side) == (0, "front")
+        assert user.sent == []
+
+    def test_nothing_is_turned_or_flipped_before_the_game_starts(self):
+        session = self.session()
+        session.started = False
+        protocol, _ = player(session, "US")
+        call(rotate, protocol, "unit", direction="right")
+        call(flip, protocol, "unit")
+        assert error_codes(protocol) == ["session_not_started", "session_not_started"]
+        unit = session.get_component("unit")
+        assert (unit.orientation, unit.side) == (0, "front")
+
+    def test_nothing_is_turned_or_flipped_while_a_player_is_away(self):
+        session = self.session(player_names=["alice", "bob"])
+        protocol, _ = player(session, "US")
+        call(flip, protocol, "unit")
+        assert error_codes(protocol) == ["players_missing"]
+
+    def test_a_token_inside_a_bag_is_neither_turned_nor_flipped(self):
+        bag = {"kind": "bag", "id": "bag", "x": 0, "y": 0, "width": 100, "height": 100,
+               "components": [dict(self.FLIPPABLE, x=None, y=None)]}
+        session = build_session({"fixed": [bag], "movable": []}, started=True)
+        protocol, _ = player(session, "US")
+        call(rotate, protocol, "unit", direction="right")
+        call(flip, protocol, "unit")
+        assert error_codes(protocol) == ["component_in_bag", "component_in_bag"]
+
+
+class TestHiddenFaces:
+    """
+    The face a token of a nationality does not show never leaves the server
+    for anybody but the players of that nationality.
+    """
+
+    UNIT = dict(TOKEN, id="unit", nationality="US", front_src="/secret.png", back_src="/back.png", side="back")
+    NEUTRAL = dict(TOKEN, id="neutral", front_src="/open.png", back_src="/open-back.png", side="back")
+
+    def table(self, *movable, **game):
+        """A session with a US player, an NVA player, one without nationality and a watcher."""
+        session = build_session(
+            {"movable": list(movable or [self.UNIT, self.NEUTRAL]), **game}, started=True)
+        users = {}
+        for name, nationality in (("us", "US"), ("nva", "NVA"), ("none", None)):
+            users[name] = FakeUser(name=name, session=session)
+            users[name].nationality = nationality
+        users["watcher"] = FakeUser(name="watcher", role="watcher", session=session)
+        # a watcher never reads a hidden face, whatever it claims to be
+        users["watcher"].nationality = "US"
+        session.players = [users["us"], users["nva"], users["none"]]
+        session.watchers = [users["watcher"]]
+        return session, users
+
+    @staticmethod
+    def token_json(session, user, component_id="unit"):
+        movable = session.return_session_json(user)["components"]["movable"]
+        return next(token for token in movable if token["id"] == component_id)
+
+    def test_only_the_players_of_the_nationality_read_the_hidden_front(self):
+        session, users = self.table()
+        assert self.token_json(session, users["us"])["front_src"] == "/secret.png"
+        for name in ("nva", "none", "watcher"):
+            token = self.token_json(session, users[name])
+            assert token["front_src"] is None, name
+            # the face shown on the table is known to everybody
+            assert token["back_src"] == "/back.png"
+            assert token["side"] == "back"
+
+    def test_the_hidden_back_of_a_token_showing_its_front_is_kept_back_too(self):
+        session, users = self.table(dict(self.UNIT, side="front"))
+        assert self.token_json(session, users["us"])["back_src"] == "/back.png"
+        token = self.token_json(session, users["nva"])
+        assert (token["front_src"], token["back_src"]) == ("/secret.png", None)
+
+    def test_a_token_without_nationality_hides_nothing(self):
+        session, users = self.table()
+        for user in users.values():
+            assert self.token_json(session, user, "neutral")["front_src"] == "/open.png"
+
+    def test_the_stored_state_keeps_both_faces(self):
+        session, _ = self.table()
+        stored = next(token for token in session.game_json_state()["movable"] if token["id"] == "unit")
+        assert (stored["front_src"], stored["back_src"]) == ("/secret.png", "/back.png")
+        # and reading the session for a user did not damage the token itself
+        assert session.get_component("unit").image_src["front"] == "/secret.png"
+
+    def test_a_flip_shows_the_new_face_and_keeps_back_the_other(self):
+        session, users = self.table()
+        call(flip, FakeProtocol(users["us"]), "unit")
+        own, other, watcher = (users[name].sent[-1] for name in ("us", "nva", "watcher"))
+        assert (own["side"], own["front_src"], own["back_src"]) == ("front", "/secret.png", "/back.png")
+        for event in (other, watcher):
+            assert (event["side"], event["front_src"], event["back_src"]) == ("front", "/secret.png", None)
+
+        call(flip, FakeProtocol(users["us"]), "unit")
+        other = users["nva"].sent[-1]
+        assert (other["side"], other["front_src"], other["back_src"]) == ("back", None, "/back.png")
+
+    def test_moving_and_releasing_a_token_does_not_leak_its_front(self):
+        session, users = self.table()
+        protocol = FakeProtocol(users["us"])
+        call(acquire, protocol, "unit")
+        call(release, protocol, "unit", x=300, y=300)
+        release_event = users["nva"].sent[-1]
+        assert release_event["event"] == "release"
+        assert release_event["component_json"]["front_src"] is None
+        assert users["us"].sent[-1]["component_json"]["front_src"] == "/secret.png"
+        assert "/secret.png" not in json.dumps(users["nva"].sent + users["watcher"].sent + users["none"].sent)
+
+    def test_fix_positions_does_not_leak_it_either(self):
+        session, users = self.table()
+        session.send({"event": "fix_positions", "components": session.fix_positions()})
+        assert "/secret.png" not in json.dumps(users["nva"].sent)
+        assert "/secret.png" in json.dumps(users["us"].sent)
+
+    def test_a_token_picked_from_a_bag_keeps_its_secret(self):
+        bag = {"kind": "bag", "id": "bag", "x": 0, "y": 0, "width": 100, "height": 100,
+               "components": [dict(self.UNIT, x=None, y=None)]}
+        session, users = self.table(self.NEUTRAL, fixed=[bag])
+        # inside the bag already, the description hides it
+        inside = session.return_session_json(users["nva"])["components"]["fixed"][0]["components"][0]
+        assert inside["front_src"] is None
+        call(pick, FakeProtocol(users["us"]), "bag")
+        assert users["us"].sent[-1]["component_json"]["front_src"] == "/secret.png"
+        assert users["nva"].sent[-1]["component_json"]["front_src"] is None
+        assert users["watcher"].sent[-1]["component_json"]["front_src"] is None
+
+    def test_a_face_the_setup_is_about_to_hide_is_kept_back_from_the_start(self):
+        unit = dict(self.UNIT, side="front")
+        session, users = self.table(unit, setup=[{"component_id": "unit", "side": "back"}])
+        # before the setup: still described on its front, which the setup will hide
+        before = self.token_json(session, users["nva"])
+        assert (before["front_src"], before["back_src"]) == (None, "/back.png")
+        assert self.token_json(session, users["us"])["front_src"] == "/secret.png"
+
+        call(apply_setup, FakeProtocol(users["us"]), "unit")
+        event = users["nva"].sent[-1]["components"][0]
+        assert (event["side"], event["front_src"], event["back_src"]) == ("back", None, "/back.png")
+        assert "/secret.png" not in json.dumps(users["nva"].sent)
+
+    def test_a_game_without_nationality_tokens_sends_its_messages_untouched(self):
+        session, users = self.table(self.NEUTRAL)
+        assert session.hides_faces is False
+        message = {"event": "x", "component_json": session.get_component("neutral").return_json()}
+        assert session.for_user(message, users["nva"]) is message

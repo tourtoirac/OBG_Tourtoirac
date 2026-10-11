@@ -86,7 +86,7 @@ def create_session(self, logger, message):
     user.send(
         {
             "event": "session_joined",
-            "session": user.session.return_session_json(),
+            "session": user.session.return_session_json(user),
             "role": user.role,
             "nationality": user.nationality,
             # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
@@ -256,7 +256,7 @@ def join_session(self, logger, message):
         logger.debug(f"{user.name} joined session {session_code} as {role}")
         user.send({
             "event": "session_joined",
-            "session": user.session.return_session_json(),
+            "session": user.session.return_session_json(user),
             "role": user.role,
             "nationality": user.nationality,
             # l'interface n'affiche le lien de clôture qu'à l'owner : elle ne
@@ -294,7 +294,7 @@ def resume_session(self, logger, message):
     logger.debug(f"{user.name} resumed session {session_key}")
     user.send({
         "event": "session_joined",
-        "session": user.session.return_session_json(),
+        "session": user.session.return_session_json(user),
         "role": user.role,
         "nationality": user.nationality,
         "owner": user.session.is_owner(user)
@@ -374,6 +374,48 @@ def resolve_component_action(self, message, action, required_fields):
     return user, component, True
 
 
+def refuse_modification(self, user, component) -> bool:
+    """
+    The single place that says whether a player may touch a component: take it
+    in hand, turn it, flip it. Every rule that forbids an acquire belongs here,
+    so that it forbids the other changes too: a player who may not take a
+    token may not turn it over either.
+
+    The server decides: a client may send the action even when its interface
+    does not offer it.
+    :return: True when the action is refused; the error is already sent
+    """
+    # the game has not started, or a seated player is away
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return True
+
+    # a token inside a bag is out of reach: it only comes out through pick,
+    # which chooses it at random
+    if user.session.bag_holding(component) is not None:
+        self.send_error(
+            "component_in_bag",
+            f"Component {component.id} is inside a bag"
+        )
+        return True
+
+    # a token that belongs to a nationality is only touched by a player of
+    # that nationality
+    if not component.acquirable_by(user):
+        self.send_error(
+            "wrong_nationality",
+            f"Component {component.id} belongs to {component.nationality}"
+        )
+        return True
+
+    return False
+
+
 def acquire(self, logger, message):
     logger.debug("Process acquire message")
     user, component, ready = resolve_component_action(
@@ -382,36 +424,10 @@ def acquire(self, logger, message):
     if not ready:
         return
 
-    # le serveur fait autorite : un client peut envoyer acquire meme quand son
-    # interface ne le propose pas
-    refusal = user.session.acquire_refusal()
-    if refusal is not None:
-        message_text = ACQUIRE_REFUSALS[refusal]
-        missing = user.session.missing_players()
-        if missing:
-            message_text = f"{message_text}: {', '.join(missing)}"
-        self.send_error(refusal, message_text)
+    if refuse_modification(self, user, component):
         return
 
     component_id = message["component_id"]
-    # a token inside a bag is out of reach: it only comes out through pick,
-    # which chooses it at random
-    if user.session.bag_holding(component) is not None:
-        self.send_error(
-            "component_in_bag",
-            f"Component {component_id} is inside a bag"
-        )
-        return
-
-    # a token that belongs to a nationality is only taken by a player of that
-    # nationality: checked here, the client only saves itself the request
-    if not component.acquirable_by(user):
-        self.send_error(
-            "wrong_nationality",
-            f"Component {component_id} belongs to {component.nationality}"
-        )
-        return
-
     acquired = component.acquire(user)
     acquire_message = {
                 "event": "acquire",
@@ -651,6 +667,10 @@ def rotate(self, logger, message):
         )
         return
 
+    # whoever may not take the token may not turn it
+    if refuse_modification(self, user, component):
+        return
+
     # un pion en main tourne sous la souris d'un autre joueur : on attend qu'il
     # soit pose. C'est aussi ce qu'attend le client, qui n'affiche les zones
     # que main vide.
@@ -746,6 +766,10 @@ def flip(self, logger, message):
             "component_not_flippable",
             f"Component {component_id} cannot be flipped"
         )
+        return
+
+    # whoever may not take the token may not turn it over
+    if refuse_modification(self, user, component):
         return
 
     # un pion en main se retourne quand meme : changer de face ne le deplace

@@ -244,14 +244,29 @@ Notion **facultative** : un `game_json` peut déclarer, **dans ses `options`**,
 `"nationalities": ["US", "NVA"]` (la clé n'est pas lue à la racine), et un `token` peut porter
 `"nationality": "US"`.
 
-**Seule règle pour l'instant** : un pion qui porte une nationalité n'est pris
-en main que par un joueur de cette nationalité (`Component.acquirable_by`,
-redéfini par `Token`). `acquire` répond sinon par l'erreur `wrong_nationality`,
-sans rien diffuser. `pick` ne tire que parmi les pions du sac que le joueur
+**Seule règle pour l'instant** : un pion qui porte une nationalité n'est touché
+que par un joueur de cette nationalité (`Component.acquirable_by`, redéfini par
+`Token`). `acquire`, `rotate` et `flip` répondent sinon par l'erreur
+`wrong_nationality`, sans rien diffuser. `pick` ne tire que parmi les pions du sac que le joueur
 peut prendre (`Bag.pick(user)`) ; s'il n'en reste que d'autres nationalités,
 même erreur. Un pion sans nationalité reste à tout le monde ; un joueur sans
-nationalité ne prend aucun pion qui en a une. `rotate` et `flip` ne sont pas
-restreints.
+nationalité ne prend aucun pion qui en a une.
+
+### Une règle d'acquisition vaut pour toutes les modifications
+
+`handle_message.refuse_modification(self, user, component)` est **le seul
+endroit** qui dit si un joueur peut toucher un composant. `acquire`, `rotate`
+et `flip` l'appellent tous les trois : partie non démarrée
+(`session_not_started`), joueur absent (`players_missing`), pion dans un sac
+(`component_in_bag`), nationalité (`wrong_nationality`). **Toute nouvelle règle
+qui empêche un `acquire` s'ajoute là**, jamais dans un seul handler, pour
+qu'elle interdise aussi la rotation et le retournement. Une future action de
+modification doit l'appeler aussi. Côté client, le miroir est
+`modificationRefused` dans `Raffaillac/src/game.ts`.
+
+`move` et `release` n'y passent pas : ils exigent déjà de tenir le pion, donc
+de l'avoir acquis. `pick` applique les mêmes règles à sa façon (règles de
+session, puis tirage parmi les pions que le joueur peut prendre).
 
 - Le joueur choisit sa nationalité en créant ou en rejoignant la partie
   (champ `nationality` de `create_session` / `join_session`). **Chabanas est
@@ -270,6 +285,50 @@ restreints.
   fait la même lecture que `Chabanas/Game/tools.py`.
 - `Chabanas.create_session` renvoie désormais `(session_info, reason)`, comme
   `join_session`.
+
+### Face cachée : elle ne quitte pas le serveur
+
+La face qu'un pion **à nationalité** ne montre pas (`front_src` s'il est sur
+son dos, `back_src` sinon) n'est envoyée qu'aux **joueurs de cette
+nationalité**. Les autres joueurs, un joueur sans nationalité et tous les
+spectateurs reçoivent `null` à la place (`Session.sees_hidden_face`).
+
+- `Session.for_user(payload, user)` fait le tri : il parcourt le message et
+  retire la face cachée de **toute** description de pion, reconnue à ses clés
+  `front_src` + `back_src` (un `return_json`, une liste, l'événement `flip`).
+- `Session.send` / `send_others` l'appliquent à **chaque destinataire** :
+  un message diffusé ne peut pas fuiter par oubli. `return_session_json(user)`
+  fait de même pour `session_joined`. **Ne jamais envoyer un `return_json` de
+  pion par `user.send` sans passer par `for_user`.**
+- `game_json_state()` (l'état stocké dans Chabanas) garde les deux faces.
+- Un pion que le setup va retourner est décrit, avant le setup, encore sur sa
+  face du `game_json` : c'est la face que le setup cachera qui est retenue
+  (`_pending_sides`), pour qu'elle ne parte pas avec la description initiale.
+- Sans aucun pion à nationalité (`Session.hides_faces` faux), les messages
+  partent tels quels, sans parcours.
+- Limite : l'`id` du pion part toujours. S'il dit ce qu'est le pion
+  (`us_marines-17`), utiliser `options.anonymous_id` (ci-dessous).
+
+## Ids anonymes (`options.anonymous_id`)
+
+Avec `"options": {"anonymous_id": true}`, `session.anonymize_ids` remplace
+l'`id` de chaque `token` (ceux de `movable` et ceux des `bag`, copies
+comprises) par un uuid tiré au hasard, **une seule fois**, à la première
+construction de la session. Les entrées de `setup` qui nomment un pion suivent
+le nouvel id. Les options reçoivent alors `"anonymized": true` : c'est ce
+marqueur, stocké avec la session, qui empêche une reprise de tirer de nouveaux
+ids. Les nouveaux ids sont ceux de l'état sauvegardé (`game_json_state`).
+
+- Seule la valeur booléenne `true` compte. Plateaux, compteurs, dés et sacs
+  gardent leur id.
+- Le `game_json` reçu de Chabanas n'est pas modifié : la session travaille sur
+  une copie, que Chabanas ne reçoit qu'à la première sauvegarde. Une session
+  perdue avant d'avoir été sauvegardée repart donc avec d'autres ids.
+- `duplicate_component_ids` contrôle toujours les ids **déclarés** par le jeu.
+
+`options` est recopié tel quel vers les clients : `component_id_display`
+(`false` masque le bandeau qui affiche le nom et la position d'un pion) n'est
+lu que par Raffaillac, Tourtoirac n'en fait rien.
 
 ## Copies d'un pion (`copies`)
 

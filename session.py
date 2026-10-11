@@ -21,6 +21,9 @@ SETUP_POSITION_FIELDS = ('x', 'y')
 # les deux faces qu'un setup peut demander pour un composant qui se retourne
 SETUP_SIDES = ('front', 'back')
 
+# the field holding the face a token does not show, by the side it shows
+HIDDEN_FACE_FIELDS = {'back': 'front_src', 'front': 'back_src'}
+
 
 def read_coordinate(value):
     """
@@ -122,6 +125,62 @@ def expand_components(components: list) -> list:
     return [copy for component in components for copy in expand_copies(component)]
 
 
+def anonymize_ids(game_json: dict) -> dict:
+    """
+    A game whose options carry "anonymous_id": true does not let the id of a
+    token tell what the token is: every token of "movable" and of the bags
+    gets a random id (uuid) in place of the one the game_json gives it. The
+    setup entries naming a token follow the new id.
+
+    It is done once, when the session is first built from the game: the
+    options then carry "anonymized": true, the new ids are the ones stored
+    with the session, and a resumed session keeps them.
+
+    Tokens asking for copies are expanded first: each copy gets its own id.
+    Boards, counters, dice and bags keep their id, which hides nothing.
+    :param game_json: the game_json as Chabanas returns it; left untouched
+    :return: the game_json to build the session from, the same object when
+        there is nothing to anonymize
+    """
+    options = game_json.get('options') if isinstance(game_json, dict) else None
+    if not isinstance(options, dict) or options.get('anonymous_id') is not True:
+        return game_json
+    if options.get('anonymized') is True:
+        return game_json
+
+    new_ids = {}
+
+    def anonymized(components) -> list:
+        renamed = []
+        for component in expand_components(components if isinstance(components, list) else []):
+            if isinstance(component, dict) and component.get('kind') == 'token' and 'id' in component:
+                component = dict(component)
+                new_ids[component['id']] = component['id'] = str(uuid.uuid4())
+            renamed.append(component)
+        return renamed
+
+    result = dict(game_json)
+    result['options'] = dict(options, anonymized=True)
+    if isinstance(game_json.get('movable'), list):
+        result['movable'] = anonymized(game_json['movable'])
+    if isinstance(game_json.get('fixed'), list):
+        result['fixed'] = [
+            dict(component, components=anonymized(component.get('components')))
+            if isinstance(component, dict) and component.get('kind') == 'bag'
+            else component
+            for component in game_json['fixed']
+        ]
+    if isinstance(game_json.get('setup'), list):
+        result['setup'] = [
+            dict(entry, component_id=new_ids[entry['component_id']])
+            if isinstance(entry, dict) and isinstance(entry.get('component_id'), str)
+            and entry['component_id'] in new_ids
+            else entry
+            for entry in game_json['setup']
+        ]
+    return result
+
+
 def duplicate_component_ids(game_json: dict) -> list:
     """
     Lists the component ids a game_json declares more than once, across its
@@ -179,6 +238,9 @@ class Session:
             player_names: list | None = None,
             player_nationalities: dict | None = None,
             ):
+        # a game asking for anonymous ids gets them here, once: everything
+        # below, and the stored state, only knows the new ids
+        game_json = anonymize_ids(game_json)
         self.key = key
         self.name = name
         self.code = code
@@ -234,6 +296,12 @@ class Session:
         # the nationality Chabanas stored on each seat, by nickname
         self.player_nationalities = dict(player_nationalities or {})
         self.load_session_components()
+        # does a token of this game belong to a nationality ? Without any,
+        # nothing is hidden from anybody and messages go out untouched
+        self.hides_faces = any(
+            isinstance(component, Token) and component.nationality is not None
+            for component in self.components_dict.values()
+        )
 
     def load_session_components(self):
         # un dé est accepté dans les trois listes : il n'est ni un plateau ni un
@@ -619,9 +687,74 @@ class Session:
         """
         return self.options.get("fix_positions", "default") is None
 
-    def return_session_json(self) -> dict:
+    def sees_hidden_face(self, user, token) -> bool:
+        """
+        Whether user may know the face a token does not show. A token that
+        belongs to a nationality keeps it for the players of that nationality:
+        the others, and every watcher, only know the face shown on the table.
+        """
+        if token.nationality is None:
+            return True
+        return (
+            user is not None
+            and getattr(user, 'role', None) == 'player'
+            and getattr(user, 'nationality', None) == token.nationality
+        )
+
+    def _pending_sides(self) -> dict:
+        """
+        The side the setup is about to give each token it turns over. Until
+        the setup is applied, a token is still described on the side of the
+        game_json, but the face the setup will hide must already be kept back.
+        :return: {component_id: side}, empty once the setup is done
+        """
+        if self.setup_done:
+            return {}
+        return {entry['component_id']: entry['side'] for entry in self.setup if 'side' in entry}
+
+    def for_user(self, payload, user):
+        """
+        What user may read of a message or of a session description: the same
+        payload, in which every token description loses the face it does not
+        show when user may not know it (sees_hidden_face). The payload itself
+        is never modified.
+
+        Every description of a token is recognised by its front_src and
+        back_src keys, wherever it sits in the payload: a token json, a list
+        of them, a flip event. A message sent through Session.send therefore
+        cannot leak a hidden face by forgetting to ask.
+        """
+        if not self.hides_faces:
+            return payload
+        return self._without_hidden_faces(payload, user, self._pending_sides())
+
+    def _without_hidden_faces(self, value, user, pending_sides: dict):
+        if isinstance(value, list):
+            return [self._without_hidden_faces(item, user, pending_sides) for item in value]
+        if not isinstance(value, dict):
+            return value
+        cleaned = {
+            key: self._without_hidden_faces(item, user, pending_sides)
+            for key, item in value.items()
+        }
+        if 'front_src' in value and 'back_src' in value:
+            token = self.components_dict.get(value.get('id', value.get('component_id')))
+            if isinstance(token, Token) and not self.sees_hidden_face(user, token):
+                side = value.get('side', token.side)
+                # a token the setup is about to turn over: the face to keep
+                # back is the one the setup will hide, not the one the
+                # game_json hides until then
+                pending = pending_sides.get(token.id)
+                if pending in HIDDEN_FACE_FIELDS and token.flippable():
+                    side = pending
+                cleaned[HIDDEN_FACE_FIELDS.get(side, 'back_src')] = None
+        return cleaned
+
+    def return_session_json(self, user=None) -> dict:
         """
         returns the description of the session
+        :param user: who will read it: the faces that user may not know are
+            left out (for_user). None keeps everything.
         :return: dict
         """
         session_json = {
@@ -646,6 +779,8 @@ class Session:
                 "dice": [component.return_json() for component in self.components_lists['dice']]
             }
         }
+        if user is not None:
+            session_json["components"] = self.for_user(session_json["components"], user)
         return session_json
 
     def refresh_seats(self, started: bool, player_names: list, player_nationalities: dict | None = None) -> None:
@@ -775,17 +910,19 @@ class Session:
             self.watchers.remove(user)
 
     def send(self, message):
+        # each user gets its own reading of the message: the hidden face of a
+        # token of another nationality never leaves the server
         for user in self.players:
-            user.send(message)
+            user.send(self.for_user(message, user))
         for user in self.watchers:
-            user.send(message)
+            user.send(self.for_user(message, user))
 
     def send_others(self, sending_user, message):
         for user in self.players:
             if sending_user != user:
-                user.send(message)
+                user.send(self.for_user(message, user))
         for user in self.watchers:
-            user.send(message)
+            user.send(self.for_user(message, user))
 
     def get_component(self, component_id):
         return self.components_dict.get(component_id, False)
