@@ -831,9 +831,9 @@ class TestFixPositionsMovesEveryStart:
 
 
 class TestConfigurableFixPositionsButton:
-    """La position du bouton "Fixe la position" est une option du jeu, portée par
-    game_json["options"]. Elle traverse la session telle quelle ; le client en
-    déduit où poser le bouton, ou qu'il ne faut pas l'afficher."""
+    """The "Fixe la position" bar is an option of the game, carried by
+    game_json["options"], as a boolean. It crosses the session untouched; the
+    client reads in it whether to show the button."""
 
     def build(self, game_json):
         return Session(
@@ -842,25 +842,33 @@ class TestConfigurableFixPositionsButton:
         )
 
     def test_the_session_json_carries_the_game_options(self, session_info):
-        session_info["game_json"]["options"] = {
-            "fix_positions": {"x": 100, "y": 20},
-        }
+        session_info["game_json"]["options"] = {"fix_positions": False}
 
         described = self.build(session_info["game_json"]).return_session_json()
 
-        assert described["options"] == {"fix_positions": {"x": 100, "y": 20}}
+        assert described["options"] == {"fix_positions": False}
 
     def test_a_game_without_options_describes_an_empty_block(self, session_info):
         described = self.build(session_info["game_json"]).return_session_json()
 
         assert described["options"] == {}
 
-    def test_null_marks_the_button_as_disabled(self, session_info):
+    def test_null_from_an_older_save_marks_the_button_as_disabled(self, session_info):
         session_info["game_json"]["options"] = {"fix_positions": None}
 
         assert self.build(session_info["game_json"]).fix_positions_disabled() is True
 
-    def test_a_position_keeps_the_button_enabled(self, session_info):
+    def test_false_marks_the_button_as_disabled(self, session_info):
+        session_info["game_json"]["options"] = {"fix_positions": False}
+
+        assert self.build(session_info["game_json"]).fix_positions_disabled() is True
+
+    def test_true_keeps_the_button_enabled(self, session_info):
+        session_info["game_json"]["options"] = {"fix_positions": True}
+
+        assert self.build(session_info["game_json"]).fix_positions_disabled() is False
+
+    def test_a_position_from_an_older_save_keeps_the_button_enabled(self, session_info):
         session_info["game_json"]["options"] = {
             "fix_positions": {"x": 100, "y": 20},
         }
@@ -871,14 +879,12 @@ class TestConfigurableFixPositionsButton:
         assert self.build(session_info["game_json"]).fix_positions_disabled() is False
 
     def test_the_options_survive_a_save_and_reload(self, session_info):
-        session_info["game_json"]["options"] = {
-            "fix_positions": {"x": 100, "y": 20},
-        }
+        session_info["game_json"]["options"] = {"fix_positions": False}
         session = self.build(session_info["game_json"])
 
         reloaded = self.build(session.game_json_state())
 
-        assert reloaded.options == {"fix_positions": {"x": 100, "y": 20}}
+        assert reloaded.options == {"fix_positions": False}
 
 
 class TestReleasedCounterGoesOnTop:

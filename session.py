@@ -321,8 +321,8 @@ class Session:
         self.watchers = []
         self.game_json = game_json
         # options du jeu : bloc libre, recopie pour ne jamais écrire dans le
-        # game_json source. options.fix_positions porte la position du bouton
-        # "Fixe la position" ; null demande de le masquer.
+        # game_json source. options.fix_positions is a boolean: false hides the
+        # "Fixe la position" button of the client and refuses the action.
         options = game_json.get("options")
         self.options = dict(options) if isinstance(options, dict) else {}
         # setup : les modifications que le jeu demande d'apporter apres
@@ -753,13 +753,13 @@ class Session:
 
     def fix_positions_disabled(self) -> bool:
         """
-        Le jeu peut masquer le bouton "Fixe la position" en posant
-        options.fix_positions = null dans son game_json. Absent, le bouton reste
-        affiché à la position par défaut : la clé n'ayant jamais servi, on ne
-        change pas le comportement des jeux existants.
+        A game turns "Fixe la position" off by setting options.fix_positions
+        to false. Absent or true, it stays on. A game saved before the option
+        became a boolean may still carry null (off) or a position (on).
         :return: bool
         """
-        return self.options.get("fix_positions", "default") is None
+        option = self.options.get("fix_positions", True)
+        return option is None or option is False
 
     def sees_hidden_face(self, user, token) -> bool:
         """

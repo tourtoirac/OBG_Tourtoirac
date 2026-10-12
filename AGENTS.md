@@ -340,6 +340,14 @@ ids. Les nouveaux ids sont ceux de l'état sauvegardé (`game_json_state`).
 (`false` masque le bandeau qui affiche le nom et la position d'un pion) n'est
 lu que par Raffaillac, Tourtoirac n'en fait rien.
 
+`options.fix_positions` est un booléen : `false` désactive « Fixe la
+position » (Raffaillac masque son bouton, et l'action `fix_positions` est
+refusée avec `fix_positions_disabled`) ; absente ou `true`, elle reste permise.
+Une partie sauvegardée avant que l'option devienne un booléen peut encore
+porter `null` (désactivé) ou une position `{x, y}` (permis).
+`options.screen_capture` (`null` ou `false` masque le bouton « Copie d'écran »)
+n'est lu que par Raffaillac.
+
 ## Copies d'un pion (`copies`)
 
 Un `token` déclaré avec `"copies": n` dans un `game_json` de jeu est remplacé,
