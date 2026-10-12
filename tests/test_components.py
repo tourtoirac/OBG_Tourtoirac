@@ -43,7 +43,7 @@ class TestComponentIdentifiers:
         (Board, ("b1", 0, 0, "s.png", 8, 6)),
         (Token, ("t1", 0, 0, "f.png", "b.png", 3, 4)),
         (Card, ("c1", 0, 0, "f.png", "b.png", 3, 4, 0)),
-        (Deck, ("d1", 0, 0, "s.png", 3, 4, "i.png")),
+        (Deck, ("d1", 0, 0, 3, 4, "duo", "b.png")),
         (Dice, ("x1", 0, 0, "s.png", 3, 4, ["a.png", "b.png"])),
         (Bag, ("g1", 0, 0, 3, 4, "i.png")),
     ])

@@ -1,6 +1,7 @@
 from twisted.internet import defer
 
 from Components.token import ROTATION_STEP
+from session import MOVABLE_KINDS
 
 # Un cran de rotation vaut ROTATION_STEP degres. Le client clique une zone et
 # dit de quel bord il tourne ; il ne peut pas choisir l'angle.
@@ -404,6 +405,23 @@ def refuse_modification(self, user, component) -> bool:
         )
         return True
 
+    # a card inside a deck is out of reach: it only comes out through draw
+    if user.session.deck_holding(component) is not None:
+        self.send_error(
+            "component_in_deck",
+            f"Component {component.id} is inside a deck"
+        )
+        return True
+
+    # a token in a private hand is off the table: only its holder plays it
+    # again, through take
+    if user.session.hand_holding(component) is not None:
+        self.send_error(
+            "component_in_hand",
+            f"Component {component.id} is in the hand of a player"
+        )
+        return True
+
     # a token that belongs to a nationality is only touched by a player of
     # that nationality
     if not component.acquirable_by(user):
@@ -431,6 +449,8 @@ def acquire(self, logger, message):
     acquired = component.acquire(user)
     acquire_message = {
                 "event": "acquire",
+                # who did it, by nickname: the user id alone names a connection
+                "nickname": user.name,
                 "component_id" : component_id,
                 "user": user.id,
                 "success": bool(acquired),
@@ -451,34 +471,121 @@ def release(self, logger, message):
     # position de depot : le client l'envoie pour que le rectangle vert puisse
     # revenir si le jeton retrouve son emplacement initial
     bag = None
-    if "x" in message and "y" in message:
+    deck, pile = None, None
+    # hand: true asks to keep the token in the private hand of the player
+    # instead of putting it down. Only a token or a card goes there.
+    # A game without private hands puts the token down where it is released.
+    to_hand = (
+        message.get("hand") is True
+        and component.kind in MOVABLE_KINDS
+        and user.session.private_hand_enabled()
+    )
+    if "x" in message and "y" in message and not to_hand:
         # a token released over a bag falls into it, whatever lies under the bag
         bag = user.session.bag_at(component, message["x"], message["y"])
-        if bag is None:
+        # and a card released over a pile of a deck joins that pile
+        deck, pile = user.session.deck_at(component, message["x"], message["y"])
+        if bag is None and deck is None:
             # on a board with a hex grid, the token is pulled onto the nearest hex
             x, y = user.session.snap_to_grid(component, message["x"], message["y"])
             component.place(x, y, user)
     released = component.release(user)
     if not released:
         bag = None
+        deck, pile = None, None
+        to_hand = False
+    elif to_hand:
+        # the token leaves the table for the hand of the player
+        user.session.put_in_hand(user, component)
     elif bag is not None:
         # the token joins the content of the bag: it leaves the table
         user.session.put_in_bag(bag, component)
+    elif deck is not None:
+        # the card goes on top of the pile: it leaves the table
+        user.session.put_in_deck(deck, pile, component)
     else:
         # un pion relâché se pose au-dessus de la pile : il repasse en fin de
         # liste, l'ordre que le client dessine et que la sauvegarde conserve
         user.session.bring_to_front(component)
     release_message = {
                 "event": "release",
+                # who did it, by nickname: the user id alone names a connection
+                "nickname": user.name,
                 "component_id" : component_id,
                 "component_json" : component.return_json(),
                 # the bag the token fell into, None when it stays on the table
                 "bag_id": bag.id if bag is not None else None,
+                # the deck and the pile the card went on, None when it stays
+                # on the table; deck_json is that deck after the release
+                "deck_id": deck.id if deck is not None else None,
+                "pile": pile,
+                "deck_json": deck.return_json() if deck is not None else None,
+                # the nickname of the player whose private hand took the token,
+                # None when it did not go to a hand
+                "hand_of": user.name if to_hand else None,
+                # what everybody sees of the private hands after this release
+                "hands": user.session.hands_json(),
                 "user": user.id,
                 "success": bool(released),
             }
     logger.debug(release_message)
     user.session.send(release_message)
+
+
+def take(self, logger, message):
+    """
+    Plays a token of the private hand of the player: it comes back on the
+    table under the pointer, held by that player as an acquire would.
+    """
+    logger.debug("Process take message")
+    user, component, ready = resolve_component_action(
+        self, message, "take", ["component_id"]
+    )
+    if not ready:
+        return
+
+    # the token lands in the mouse hand of the player: same conditions as
+    # taking a token from the table
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return
+
+    if not user.session.private_hand_enabled():
+        self.send_error(
+            "private_hand_disabled",
+            "This game has no private hand"
+        )
+        return
+
+    component_id = message["component_id"]
+    if not user.session.take_from_hand(user, component, message.get("x"), message.get("y")):
+        self.send_error(
+            "component_not_in_hand",
+            f"Component {component_id} is not in the hand of this player"
+        )
+        return
+
+    request_id = message.get("request_id")
+    # sent to everyone: each screen puts the token back on the table, in the
+    # mouse hand of the player who played it
+    user.session.send({
+        "event": "take",
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
+        "component_id": component_id,
+        "user": user.id,
+        # the nickname of the player the token came from
+        "hand_of": user.name,
+        "hands": user.session.hands_json(),
+        # echoed as is, so the client recognises the answer to its own request
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "component_json": component.return_json(),
+    })
 
 
 def pick(self, logger, message):
@@ -530,12 +637,139 @@ def pick(self, logger, message):
     # it in the hand of the player who picked it
     user.session.send({
         "event": "pick",
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
         "component_id": component_id,
         "user": user.id,
         # echoed as is: two players may pick from the same bag at once, and
         # each client must tell its own token from the other's
         "request_id": request_id if isinstance(request_id, str) else None,
         "component_json": token.return_json(),
+    })
+
+
+def resolve_deck_action(self, message, action):
+    """
+    Shared preamble of the deck actions (draw, shuffle, refill): the caller is
+    a player allowed to touch the table, the component is a deck, and the pile
+    the message names exists on it.
+    :return: (user, deck, pile), or (None, None, None) when an error has
+        already been sent to the client. The pile is "draw" when the message
+        names none.
+    """
+    user, component, ready = resolve_component_action(
+        self, message, action, ["component_id"]
+    )
+    if not ready:
+        return None, None, None
+
+    # a deck is only handled when a token may be taken: the game has started
+    # and every seated player is there
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return None, None, None
+
+    component_id = message["component_id"]
+    if component.kind != 'deck':
+        self.send_error(
+            "component_not_a_deck",
+            f"Component {component_id} is not a deck"
+        )
+        return None, None, None
+
+    pile = message.get("pile", "draw")
+    if not isinstance(pile, str) or pile not in component.piles:
+        self.send_error(
+            "unknown_pile",
+            f"Deck {component_id} has no {pile} pile"
+        )
+        return None, None, None
+
+    return user, component, pile
+
+
+def draw(self, logger, message):
+    """
+    Takes the top card of a pile of a deck. The client only says which pile it
+    clicked and where: the server puts the card back on the table under the
+    pointer and in the hand of the player, as an acquire would.
+    """
+    logger.debug("Process draw message")
+    user, deck, pile = resolve_deck_action(self, message, "draw")
+    if user is None:
+        return
+
+    card = user.session.draw_from_deck(deck, pile, user, message.get("x"), message.get("y"))
+    if card is None:
+        if deck.top(pile) is not None:
+            # the top card belongs to another nationality
+            self.send_error(
+                "wrong_nationality",
+                f"The top card of deck {deck.id} is not for this player"
+            )
+        else:
+            self.send_error("pile_empty", f"The {pile} pile of deck {deck.id} is empty")
+        return
+
+    request_id = message.get("request_id")
+    # sent to everyone: each screen shows the card in the hand of the player
+    # who drew it. Its front stays on the server while it lies on its back.
+    user.session.send({
+        "event": "draw",
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
+        "component_id": deck.id,
+        "pile": pile,
+        "user": user.id,
+        # echoed as is, so the client recognises the answer to its own request
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "component_json": card.return_json(),
+        "deck_json": deck.return_json(),
+    })
+
+
+def shuffle(self, logger, message):
+    """
+    Shuffles a pile of a deck.
+    """
+    logger.debug("Process shuffle message")
+    user, deck, pile = resolve_deck_action(self, message, "shuffle")
+    if user is None:
+        return
+
+    deck.shuffle(pile)
+    user.session.send({
+        "event": "shuffle",
+        "component_id": deck.id,
+        "pile": pile,
+        "user": user.id,
+        # the nickname of the player, so every screen can say who shuffled
+        "nickname": user.name,
+        "deck_json": deck.return_json(),
+    })
+
+
+def refill(self, logger, message):
+    """
+    Puts every card of the discard pile of a deck back into its draw pile.
+    """
+    logger.debug("Process refill message")
+    user, deck, _ = resolve_deck_action(self, dict(message, pile="discard"), "refill")
+    if user is None:
+        return
+
+    deck.refill()
+    user.session.send({
+        "event": "refill",
+        "component_id": deck.id,
+        "user": user.id,
+        "nickname": user.name,
+        "deck_json": deck.return_json(),
     })
 
 

@@ -4,7 +4,9 @@ from user import User
 from Components.bag import Bag
 from Components.board import Board
 from Components.board_group import BoardGroup
+from Components.card import Card
 from Components.counter import Counter, DEFAULT_COUNTER_COLOR
+from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
 from Components.token import Token
@@ -23,6 +25,13 @@ SETUP_SIDES = ('front', 'back')
 
 # the field holding the face a token does not show, by the side it shows
 HIDDEN_FACE_FIELDS = {'back': 'front_src', 'front': 'back_src'}
+
+# the kinds a player moves with the mouse: a card is handled like a token
+MOVABLE_KINDS = ('token', 'card')
+
+# the lists of a deck description holding its cards: the draw pile, then the
+# discard pile a saved state adds
+DECK_CARD_LISTS = ('components', 'discard')
 
 
 def read_coordinate(value):
@@ -149,6 +158,29 @@ def read_nationalities(game_json) -> list:
     return nationalities
 
 
+def read_documents(game_json) -> list:
+    """
+    Reads the optional "documents" key of a game_json: the PDF files (rules,
+    charts...) the players may open from the game page.
+    :return: the documents in the order of the game_json, each one as
+        {"src": ..., "name": ...}; an entry without a src is left out, and one
+        without a name takes its src as name
+    """
+    declared = game_json.get('documents') if isinstance(game_json, dict) else None
+    if not isinstance(declared, list):
+        return []
+    documents = []
+    for document in declared:
+        if not isinstance(document, dict):
+            continue
+        src = document.get('src')
+        if not isinstance(src, str) or not src:
+            continue
+        name = document.get('name')
+        documents.append({"src": src, "name": name if isinstance(name, str) and name else src})
+    return documents
+
+
 def expand_copies(component) -> list:
     """
     A token declared with "copies": n stands for n identical tokens: it is
@@ -160,7 +192,7 @@ def expand_copies(component) -> list:
     :return: the copies, or the component alone when it asks for none. A
         "copies" that is not an integer of at least 1 is ignored.
     """
-    if not isinstance(component, dict) or component.get('kind') != 'token' or 'id' not in component:
+    if not isinstance(component, dict) or component.get('kind') not in MOVABLE_KINDS or 'id' not in component:
         return [component]
     copies = component.get('copies')
     # bool is an int in Python: true is a typing mistake, not one copy
@@ -213,23 +245,32 @@ def anonymize_ids(game_json: dict) -> dict:
     def anonymized(components) -> list:
         renamed = []
         for component in expand_components(components if isinstance(components, list) else []):
-            if isinstance(component, dict) and component.get('kind') == 'token' and 'id' in component:
+            if isinstance(component, dict) and component.get('kind') in MOVABLE_KINDS and 'id' in component:
                 component = dict(component)
                 new_ids[component['id']] = component['id'] = str(uuid.uuid4())
             renamed.append(component)
         return renamed
+
+    def anonymized_container(component):
+        # the tokens of a bag and the cards of a deck are renamed like those
+        # of "movable"
+        if not isinstance(component, dict):
+            return component
+        if component.get('kind') == 'bag':
+            return dict(component, components=anonymized(component.get('components')))
+        if component.get('kind') == 'deck':
+            return dict(component, **{
+                key: anonymized(component[key])
+                for key in DECK_CARD_LISTS if isinstance(component.get(key), list)
+            })
+        return component
 
     result = dict(game_json)
     result['options'] = dict(options, anonymized=True)
     if isinstance(game_json.get('movable'), list):
         result['movable'] = anonymized(game_json['movable'])
     if isinstance(game_json.get('fixed'), list):
-        result['fixed'] = [
-            dict(component, components=anonymized(component.get('components')))
-            if isinstance(component, dict) and component.get('kind') == 'bag'
-            else component
-            for component in game_json['fixed']
-        ]
+        result['fixed'] = [anonymized_container(component) for component in game_json['fixed']]
     if isinstance(game_json.get('setup'), list):
         result['setup'] = [
             dict(entry, component_id=new_ids[entry['component_id']])
@@ -273,6 +314,13 @@ def duplicate_component_ids(game_json: dict) -> list:
             elif component.get('kind') == 'bag' and isinstance(component.get('components'), list):
                 # the tokens of a bag may ask for copies too
                 nested = expand_components(component['components'])
+            elif component.get('kind') == 'deck':
+                # and so may the cards of a deck, in either of its piles
+                nested = [
+                    card
+                    for key in DECK_CARD_LISTS if isinstance(component.get(key), list)
+                    for card in expand_components(component[key])
+                ]
             ids = [component['id']]
             if isinstance(nested, list):
                 ids += [item['id'] for item in nested if isinstance(item, dict) and 'id' in item]
@@ -355,11 +403,21 @@ class Session:
         self.nationalities = read_nationalities(game_json)
         # the nationality Chabanas stored on each seat, by nickname
         self.player_nationalities = dict(player_nationalities or {})
+        # documents: the PDF files the game lets the players consult. They
+        # stay in the game_json, so the saved state keeps them.
+        self.documents = read_documents(game_json)
+        # private hands: the tokens each player keeps off the table, by
+        # nickname. The seat holds the hand, not the connection: it is still
+        # there when the player comes back.
+        self.hands = {}
         self.load_session_components()
-        # does a token of this game belong to a nationality ? Without any,
-        # nothing is hidden from anybody and messages go out untouched
+        self.load_hands(game_json.get('hands'))
+        # does a token of this game belong to a nationality, or is it a card ?
+        # Without any, nothing is hidden from anybody and messages go out
+        # untouched
         self.hides_faces = any(
-            isinstance(component, Token) and component.nationality is not None
+            isinstance(component, Card)
+            or (isinstance(component, Token) and component.nationality is not None)
             for component in self.components_dict.values()
         )
 
@@ -416,8 +474,16 @@ class Session:
                             game_component = self.build_bag(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
+                        case 'deck' if list_name == 'fixed':
+                            game_component = self.build_deck(component)
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
                         case 'token' if list_name == 'movable':
                             game_component = self.build_token(component)
+                            self.components_lists['movable'].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                        case 'card' if list_name == 'movable':
+                            game_component = self.build_card(component)
                             self.components_lists['movable'].append(game_component)
                             self.components_dict[component['id']] = game_component
                 except InvalidComponentError:
@@ -476,6 +542,147 @@ class Session:
             component.get('nationality')
         )
 
+    @staticmethod
+    def build_card(component: dict, deck: dict | None = None) -> Card:
+        """
+        Builds a card from its game_json description, whether it is declared
+        in "movable" or inside a deck.
+        :param component: the card description from the game_json
+        :param deck: the description of the deck holding the card. Such a card
+            has no position, and takes the size and the back of its deck when
+            it declares none of its own.
+        """
+        if deck is None:
+            x, y = component['x'], component['y']
+            width, height = component['width'], component['height']
+            back_src = component.get('back_src')
+        else:
+            x = y = None
+            width = component.get('width', deck['width'])
+            height = component.get('height', deck['height'])
+            back_src = component.get('back_src') or deck.get('back_src')
+        return Card(
+            component['id'],
+            x,
+            y,
+            component['front_src'],
+            back_src,
+            width,
+            height,
+            # orientation and side: only there on a session resumed after a
+            # save; a card of a game starts upright
+            component.get('orientation', 0),
+            component.get('side'),
+            component.get('nationality'),
+            component.get('orientable', False),
+            component.get('border'),
+        )
+
+    def build_deck(self, component: dict) -> Deck:
+        """
+        Builds a deck and indexes each of its cards by its own id. The cards
+        stay inside the deck: they are not filed under "movable" until a
+        player draws them, the deck carries them in the saved state. A deck
+        may be empty: players fill it during the game.
+
+        "components" lists the cards of the draw pile, the last one on top.
+        "discard" lists those of the discard pile: a game seldom declares it,
+        a saved state does.
+        :param component: the deck description from the game_json
+        """
+        piles = {}
+        for key in DECK_CARD_LISTS:
+            content = component.get(key)
+            piles[key] = [
+                build_checked(lambda item: self.build_card(item, component), item, 'fixed', component.get('id'))
+                # a card of a deck may ask for copies, like a token
+                for item in expand_components(content if isinstance(content, list) else [])
+                # a deck only holds cards: anything else is ignored
+                if isinstance(item, dict) and item.get('kind') == 'card'
+            ]
+            for card in piles[key]:
+                self.components_dict[card.id] = card
+        return Deck(
+            component['id'],
+            component['x'],
+            component['y'],
+            component['width'],
+            component['height'],
+            # type: "single" is one pile, "duo" a draw pile and a discard pile
+            component.get('type', 'single'),
+            component.get('back_src'),
+            piles['components'],
+            piles['discard'],
+            # text: optional caption shown above the deck
+            component.get('text'),
+            # where the discard pile lies; next to the draw pile by default
+            component.get('discard_x'),
+            component.get('discard_y'),
+        )
+
+    def deck_holding(self, component) -> Deck | None:
+        """
+        The deck a component is waiting in, or None when it is elsewhere.
+        """
+        for candidate in self.components_lists['fixed']:
+            if isinstance(candidate, Deck) and candidate.holds(component):
+                return candidate
+        return None
+
+    def deck_at(self, component, x, y) -> tuple:
+        """
+        The pile a card released at (x, y) joins: the one its center lies on.
+        Decks are drawn in list order, so the last one under the point wins.
+        Only a card goes into a deck.
+        :param x: top-left corner of the card, as sent by the client
+        :return: (deck, pile name), or (None, None) when the card lands on
+            the table
+        """
+        if not isinstance(component, Card):
+            return None, None
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            return None, None
+        center_x = x + component.width / 2
+        center_y = y + component.height / 2
+        for candidate in reversed(self.components_lists['fixed']):
+            if isinstance(candidate, Deck):
+                pile = candidate.pile_at(center_x, center_y)
+                if pile is not None:
+                    return candidate, pile
+        return None, None
+
+    def put_in_deck(self, deck: Deck, pile: str, component) -> None:
+        """
+        Moves a card from the table onto a pile of a deck: it leaves "movable"
+        and loses its position until somebody draws it.
+        """
+        movable = self.components_lists['movable']
+        if component in movable:
+            movable.remove(component)
+        deck.add(pile, component)
+
+    def draw_from_deck(self, deck: Deck, pile: str, user: User, x=None, y=None):
+        """
+        Takes the top card of a pile and puts it in the hand of user: it comes
+        back on the table, above the others, centered on (x, y), on the side
+        it had on its pile.
+        :param x: where the player clicked; the center of the pile when the
+            client gives no usable point
+        :return: the card, or None when the pile has none user may take: it
+            is empty, or its top card belongs to another nationality
+        """
+        card = deck.draw(pile, user)
+        if card is None:
+            return None
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            pile_x, pile_y = deck.pile_position(pile)
+            x = pile_x + deck.width / 2
+            y = pile_y + deck.height / 2
+        card.enter_table(x - card.width / 2, y - card.height / 2)
+        self.components_lists['movable'].append(card)
+        card.acquire(user)
+        return card
+
     def build_bag(self, component: dict) -> Bag:
         """
         Builds a bag and indexes each of its tokens by its own id. The tokens
@@ -509,6 +716,107 @@ class Session:
             # count: true shows the number of tokens left in the bag
             component.get('count', False)
         )
+
+    def load_hands(self, saved) -> None:
+        """
+        Rebuilds the private hands of a resumed session. A game_json of a game
+        declares none: the key only exists in a saved state.
+        :param saved: {nickname: [token description, ...]} or anything else
+        """
+        if not isinstance(saved, dict):
+            return
+        for nickname, items in saved.items():
+            if not isinstance(nickname, str) or not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or item.get('kind') not in MOVABLE_KINDS:
+                    continue
+                if item['kind'] == 'card':
+                    # a card held in a hand has no position, like one of a deck
+                    token = build_checked(lambda card: self.build_card(card, card), item, 'hands')
+                else:
+                    token = build_checked(self.build_token, item, 'hands')
+                token.leave_table()
+                self.components_dict[token.id] = token
+                self.hands.setdefault(nickname, []).append(token)
+
+    def private_hand_enabled(self) -> bool:
+        """
+        A game turns the private hands on by setting options.private_hand to
+        true. Absent or anything else, nobody keeps a token off the table.
+        """
+        return self.options.get("private_hand") is True
+
+    def hand_holding(self, component) -> str | None:
+        """
+        The nickname of the player keeping a component in a private hand, or
+        None when it is on the table or in a bag.
+        """
+        for nickname, held in self.hands.items():
+            if any(component is item for item in held):
+                return nickname
+        return None
+
+    def put_in_hand(self, user: User, component) -> None:
+        """
+        Moves a token from the table into the private hand of user: it leaves
+        "movable" and loses its position until that player plays it again.
+        """
+        movable = self.components_lists['movable']
+        if component in movable:
+            movable.remove(component)
+        component.leave_table()
+        self.hands.setdefault(user.name, []).append(component)
+
+    def take_from_hand(self, user: User, component, x=None, y=None) -> bool:
+        """
+        Puts a token of the private hand of user back on the table, above the
+        others, centered on (x, y) and held by that player like a token just
+        acquired.
+        :return: False when the token is not in the hand of user
+        """
+        held = self.hands.get(user.name, [])
+        if not any(component is item for item in held):
+            return False
+        held.remove(component)
+        if not held:
+            del self.hands[user.name]
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            x = component.width / 2
+            y = component.height / 2
+        component.enter_table(x - component.width / 2, y - component.height / 2)
+        self.components_lists['movable'].append(component)
+        component.acquire(user)
+        return True
+
+    def hands_json(self) -> dict:
+        """
+        What everybody may know of the private hands: for each player, the
+        back and the size of each token held, in order. Neither the id nor the
+        front is given. A token without a back, or one that belongs to a
+        nationality, is described without picture.
+        :return: {nickname: [{"src", "width", "height"}, ...]}
+        """
+        return {
+            nickname: [
+                {
+                    "src": token.image_src['back'] if token.nationality is None else None,
+                    "width": token.width,
+                    "height": token.height,
+                }
+                for token in held
+            ]
+            for nickname, held in self.hands.items()
+        }
+
+    def hand_json(self, user) -> list:
+        """
+        The private hand of user, each token fully described: only that
+        player reads it.
+        """
+        if user is None or getattr(user, 'role', None) != 'player':
+            return []
+        return [token.return_json() for token in self.hands.get(user.name, [])]
 
     def bag_holding(self, component) -> Bag | None:
         """
@@ -716,7 +1024,8 @@ class Session:
                 self._rounded_position(component.return_json())
             )
         state['fixed'] = [
-            self._rounded_position(component.return_json())
+            # a deck stores its cards, which it keeps from the clients
+            self._rounded_position(component.state_json())
             for component in self.components_lists['fixed']
         ] + dice_by_origin['fixed']
         state['movable'] = [
@@ -726,6 +1035,13 @@ class Session:
         # une liste "dice" dédiée n'est écrite que si le jeu en a une
         if dice_by_origin['dice'] or 'dice' in state:
             state['dice'] = dice_by_origin['dice']
+        # the private hands are stored by nickname, and only when there are any
+        state.pop('hands', None)
+        if self.hands:
+            state['hands'] = {
+                nickname: [token.return_json() for token in held]
+                for nickname, held in self.hands.items()
+            }
         return state
 
     @staticmethod
@@ -761,19 +1077,24 @@ class Session:
         option = self.options.get("fix_positions", True)
         return option is None or option is False
 
-    def sees_hidden_face(self, user, token) -> bool:
+    def sees_hidden_face(self, user, token, side=None) -> bool:
         """
         Whether user may know the face a token does not show. A token that
         belongs to a nationality keeps it for the players of that nationality:
         the others, and every watcher, only know the face shown on the table.
+        :param side: the side the token is described on, when it is not the
+            one it shows right now
         """
-        if token.nationality is None:
-            return True
-        return (
-            user is not None
-            and getattr(user, 'role', None) == 'player'
-            and getattr(user, 'nationality', None) == token.nationality
-        )
+        is_player = user is not None and getattr(user, 'role', None) == 'player'
+        if token.nationality is not None and not (
+            is_player and getattr(user, 'nationality', None) == token.nationality
+        ):
+            return False
+        # the front of a card lying on its back is known to nobody, except
+        # the player keeping that card in a private hand
+        if isinstance(token, Card) and (side or token.side) == 'back':
+            return is_player and self.hand_holding(token) == user.name
+        return True
 
     def _pending_sides(self) -> dict:
         """
@@ -813,7 +1134,7 @@ class Session:
         }
         if 'front_src' in value and 'back_src' in value:
             token = self.components_dict.get(value.get('id', value.get('component_id')))
-            if isinstance(token, Token) and not self.sees_hidden_face(user, token):
+            if isinstance(token, Token):
                 side = value.get('side', token.side)
                 # a token the setup is about to turn over: the face to keep
                 # back is the one the setup will hide, not the one the
@@ -821,7 +1142,8 @@ class Session:
                 pending = pending_sides.get(token.id)
                 if pending in HIDDEN_FACE_FIELDS and token.flippable():
                     side = pending
-                cleaned[HIDDEN_FACE_FIELDS.get(side, 'back_src')] = None
+                if not self.sees_hidden_face(user, token, side):
+                    cleaned[HIDDEN_FACE_FIELDS.get(side, 'back_src')] = None
         return cleaned
 
     def return_session_json(self, user=None) -> dict:
@@ -842,8 +1164,10 @@ class Session:
             "watchers": f"{len(self.watchers)}/{self.max_watchers}",
             "started": self.started,
             "missing_players": self.missing_players(),
+            "participants": self.participants(),
             "nationalities": self.nationalities,
             "player_nationalities": self.player_nationalities,
+            "documents": self.documents,
             # le setup en attente que le client applique : une fois la partie
             # installee, la liste est vide et personne ne rejoue la mise en place
             "setup": self.pending_setup(),
@@ -853,8 +1177,13 @@ class Session:
                 "dice": [component.return_json() for component in self.components_lists['dice']]
             }
         }
+        # hands: what everybody sees of the private hands; hand: the one of the
+        # reader, with its faces
+        session_json["hands"] = self.hands_json()
+        session_json["hand"] = self.hand_json(user)
         if user is not None:
             session_json["components"] = self.for_user(session_json["components"], user)
+            session_json["hand"] = self.for_user(session_json["hand"], user)
         return session_json
 
     def refresh_seats(self, started: bool, player_names: list, player_nationalities: dict | None = None) -> None:
@@ -876,6 +1205,30 @@ class Session:
         """
         connected = {user.name for user in self.players}
         return [name for name in self.player_names if name not in connected]
+
+    def participants(self) -> list:
+        """
+        Everybody attached to the game, for the list each screen shows: the
+        seats first, connected or not, then the watchers.
+        :return: a list of {"nickname", "role", "connected"}; role is "player"
+            or "watcher", and a watcher is always connected
+        """
+        connected = [user.name for user in self.players]
+        watching = [user.name for user in self.watchers]
+        # without a list of seats, the players at the table are all we know
+        seats = list(self.player_names)
+        seats += [name for name in connected if name not in seats]
+        listed = []
+        for name in seats:
+            # a closed game turned its players into watchers: they keep their
+            # seat on the list as long as they stay
+            present = name in connected or (self.closed and name in watching)
+            listed.append({"nickname": name, "role": "player", "connected": present})
+        for name in watching:
+            if self.closed and name in seats:
+                continue
+            listed.append({"nickname": name, "role": "watcher", "connected": True})
+        return listed
 
     def acquire_refusal(self) -> str | None:
         """
@@ -899,6 +1252,7 @@ class Session:
             "event": "session_status",
             "started": self.started,
             "missing_players": self.missing_players(),
+            "participants": self.participants(),
         }
 
     def is_owner(self, user: User) -> bool:
@@ -1093,7 +1447,11 @@ class Session:
             moved = False
             # a token inside a bag has no position: the setup may only choose
             # the face it will show when it comes out
-            in_bag = self.bag_holding(component) is not None
+            in_bag = (
+                self.bag_holding(component) is not None
+                or self.deck_holding(component) is not None
+                or self.hand_holding(component) is not None
+            )
             for field in SETUP_POSITION_FIELDS:
                 if field in entry and not in_bag:
                     setattr(component, field, entry[field])

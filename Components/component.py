@@ -14,6 +14,13 @@ class Component:
         """
         pass
 
+    def state_json(self):
+        """
+        The component as the saved state stores it. It is what the clients
+        read, except for a component that keeps part of itself from them.
+        """
+        return self.return_json()
+
     def acquire(self, user: User):
         """
         Marks the component as acquired by user.

@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, move, roll, roll_pool, rotate, flip, fix_positions, apply_setup, increment, decrement
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, draw, shuffle, refill, move, roll, roll_pool, rotate, flip, fix_positions, apply_setup, increment, decrement
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -101,6 +101,14 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 release(self, self.factory.lobby.logger, message)
             case "pick": # a player takes a random token out of a bag
                 pick(self, self.factory.lobby.logger, message)
+            case "take": # a player plays a token of its private hand
+                take(self, self.factory.lobby.logger, message)
+            case "draw": # a player takes the top card of a pile of a deck
+                draw(self, self.factory.lobby.logger, message)
+            case "shuffle": # a player shuffles a pile of a deck
+                shuffle(self, self.factory.lobby.logger, message)
+            case "refill": # a player puts the discard pile back into the draw pile
+                refill(self, self.factory.lobby.logger, message)
             case "move": # change the x and y value of a component
                 move(self, self.factory.lobby.logger, message)
             case "roll": # players launch a dice and everyone sees the new face

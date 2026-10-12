@@ -196,6 +196,10 @@ class TestStartButton:
         for protocol in (alice, bob):
             assert protocol.last_status() == {
                 "event": "session_status", "started": True, "missing_players": [],
+                "participants": [
+                    {"nickname": "alice", "role": "player", "connected": True},
+                    {"nickname": "bob", "role": "player", "connected": True},
+                ],
             }
 
     def test_the_lobby_hears_about_the_start(self, lobby):

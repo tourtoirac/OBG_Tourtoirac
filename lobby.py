@@ -437,6 +437,8 @@ class Lobby:
         # toute la session l'apprend : l'owner qui reclique, et les autres qui
         # passent du coup du role de joueur a celui de spectateur
         session.send({"event": "session_closed"})
+        # the players became watchers: each screen refreshes its list of names
+        self._send_status(session)
         self._notify_lobby_users("closed", session)
         return True, None
 
