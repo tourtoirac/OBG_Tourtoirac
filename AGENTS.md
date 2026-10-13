@@ -29,7 +29,7 @@ Aucune CI : `pytest` est le seul garde-fou.
 ## État de la suite (vérifié le 13/10/2026)
 
 ```
-638 passed, 2 failed, 6 skipped
+646 passed, 2 failed, 6 skipped
 ```
 
 Les 2 échecs sont **préexistants et hors sujet** : `tests/test_chabanas.py`.
@@ -729,6 +729,24 @@ python3 sherlock_bot.py --code ABCD1234 --bots 2  # bots rejoignant des humains
   événements d'un siège), `SherlockBot` (stratégie) et `Game` (mise en place,
   boucle de jeu). Les ids de paquets `pack`, `villains`, `deal` sont ceux du
   `game_json` du jeu.
+- Fonctions du serveur que les bots utilisent (mise à jour du 13/10/2026) :
+  `deck` **et** `stack` sont des piles (`DECK_KINDS`) ; si `deal` est un
+  `stack` et la main privée active, `Game.setup` distribue par l'action
+  `deal` (six fois : humains compris, plus personne ne pioche sa donne),
+  sinon `_deal_by_hand` garde l'ancienne distribution. `draw_many` /
+  `draw_to_pile(count=…)` piochent par 10 (`count`, un événement `draw` par
+  carte, le dernier a `index == count - 1`). Une carte sort d'une main sur la
+  face qu'elle y a : `hand_to_table(face_down=True)` la retourne d'abord en
+  main (`flip`), ce que fait `dump_hand`.
+- Mains regardées : avec `private_hand.show_hands_to_other_players`,
+  `Game.is_guilty` demande à l'humain de montrer sa main au bot
+  (`read_shown_hand`, événement `show` → `TableClient.shows`,
+  `shown_names`) et n'interroge la console qu'après `show_timeout` (120 s, option
+  `--show-timeout`).
+  Dans l'autre sens, les commandes `montre <bot> <pseudo|tous>` et
+  `cache <bot>` ouvrent et ferment la zone du bot (`show_hand`, `hide_hand`).
+- L'ordre du tour est celui de `participants`, donc l'ordre d'arrivée des
+  joueurs, ou celui que l'owner a choisi dans la liste (`order_players`).
 - Le serveur ne connaît ni tour ni règle : **le tour est déduit** des cartes
   posées sur la défausse et des pioches gardées en main. C'est pourquoi les
   événements `acquire`, `release`, `take`, `pick` et `draw` portent `nickname`.

@@ -22,7 +22,7 @@ import threading
 import websockets
 
 from bots.client import BotError, TableClient
-from bots.sherlock import Game, Operator
+from bots.sherlock import SHOW_TIMEOUT, Game, Operator
 
 GAME_NAME = "SherlockHolmes"
 DEFAULT_URL = "ws://localhost:12201"
@@ -190,6 +190,9 @@ async def main() -> None:
     parser.add_argument("--delay", type=float, default=1.5, help="seconds a bot waits before acting")
     parser.add_argument("--grace", type=float, default=4.0,
                         help="seconds more left to a human who drew a card to play it")
+    parser.add_argument("--show-timeout", type=float, default=SHOW_TIMEOUT,
+                        help="seconds a human is given to show its hand to a bot, before the "
+                             f"console is asked instead (default {SHOW_TIMEOUT:g})")
     arguments = parser.parse_args()
 
     names = [name.strip() for name in (arguments.names or "").split(",") if name.strip()]
@@ -212,7 +215,8 @@ async def main() -> None:
         console.say(f"{nickname} est à la table")
         clients.append(client)
 
-    game = Game(clients, console, delay=arguments.delay, grace=arguments.grace)
+    game = Game(clients, console, delay=arguments.delay, grace=arguments.grace,
+                show_timeout=arguments.show_timeout)
     if game.watcher.private_hand() is None:
         console.say("Attention : ce jeu n'a pas l'option private_hand, les bots ne peuvent pas tenir de cartes")
     elif not game.watcher.can_show_hands():
