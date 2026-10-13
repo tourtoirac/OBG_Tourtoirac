@@ -1,5 +1,6 @@
 from twisted.internet import defer
 
+from Components.deck import Deck
 from Components.token import ROTATION_STEP
 from session import MOVABLE_KINDS
 
@@ -563,6 +564,7 @@ def take(self, logger, message):
         return
 
     component_id = message["component_id"]
+    was_shown = user.session.shown_by(component) == user.name
     if not user.session.take_from_hand(user, component, message.get("x"), message.get("y")):
         self.send_error(
             "component_not_in_hand",
@@ -586,6 +588,112 @@ def take(self, logger, message):
         "request_id": request_id if isinstance(request_id, str) else None,
         "component_json": component.return_json(),
     })
+    # the card was shown from the hand: it leaves that area too
+    if was_shown:
+        user.session.send_show(user.name)
+
+
+def resolve_show_action(self, action):
+    """
+    Shared preamble of the actions on the area a player shows cards of its
+    hand in (show_open, show_add, show_close).
+    Returns the user when the action can proceed, or None when an error has
+    already been sent to the client.
+    """
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error(
+            "unknown_user",
+            "No user is bound to this connection"
+        )
+        return None
+
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            f"The {action} action requires an active session"
+        )
+        return None
+
+    if user.role != "player":
+        self.send_error(
+            "watcher_not_allowed",
+            "Only players can show cards of their hand"
+        )
+        return None
+
+    if not user.session.show_hands_enabled():
+        self.send_error(
+            "show_hands_disabled",
+            "This game does not let the players show their hand"
+        )
+        return None
+
+    return user
+
+
+def show_open(self, logger, message):
+    """
+    Opens the area a player shows cards of its hand in, for one other player
+    or for all of them. Asked again, it changes who reads the area.
+    """
+    logger.debug("Process show_open message")
+    user = resolve_show_action(self, "show_open")
+    if user is None:
+        return
+
+    to = message.get("to")
+    if not isinstance(to, str) or not user.session.open_show(user.name, to):
+        self.send_error(
+            "unknown_player",
+            "The hand is shown to \"all\" or to another player of the game"
+        )
+        return
+
+    user.session.send_show(user.name)
+
+
+def show_add(self, logger, message):
+    """
+    Shows one more card of the hand of the player, on the side it has there.
+    """
+    logger.debug("Process show_add message")
+    user = resolve_show_action(self, "show_add")
+    if user is None:
+        return
+
+    session = user.session
+    if user.name not in session.shows:
+        self.send_error(
+            "show_not_open",
+            "This player is not showing its hand"
+        )
+        return
+
+    component_id = message.get("component_id")
+    component = session.get_component(component_id)
+    if not component or not session.add_to_show(user.name, component):
+        self.send_error(
+            "component_not_in_hand",
+            f"Component {component_id} is not in the hand of this player"
+        )
+        return
+
+    session.send_show(user.name)
+
+
+def show_close(self, logger, _):
+    """
+    Closes the area of the player: the cards it showed are only in its hand
+    again.
+    """
+    logger.debug("Process show_close message")
+    user = resolve_show_action(self, "show_close")
+    if user is None:
+        return
+
+    if user.session.close_show(user.name):
+        user.session.send_show(user.name)
 
 
 def pick(self, logger, message):
@@ -650,9 +758,9 @@ def pick(self, logger, message):
 
 def resolve_deck_action(self, message, action):
     """
-    Shared preamble of the deck actions (draw, shuffle, refill): the caller is
-    a player allowed to touch the table, the component is a deck, and the pile
-    the message names exists on it.
+    Shared preamble of the deck actions (draw, shuffle, refill, deal): the
+    caller is a player allowed to touch the table, the component is a deck or
+    a stack, and the pile the message names exists on it.
     :return: (user, deck, pile), or (None, None, None) when an error has
         already been sent to the client. The pile is "draw" when the message
         names none.
@@ -675,7 +783,7 @@ def resolve_deck_action(self, message, action):
         return None, None, None
 
     component_id = message["component_id"]
-    if component.kind != 'deck':
+    if not isinstance(component, Deck):
         self.send_error(
             "component_not_a_deck",
             f"Component {component_id} is not a deck"
@@ -695,17 +803,20 @@ def resolve_deck_action(self, message, action):
 
 def draw(self, logger, message):
     """
-    Takes the top card of a pile of a deck. The client only says which pile it
-    clicked and where: the server puts the card back on the table under the
-    pointer and in the hand of the player, as an acquire would.
+    Takes the top card of a pile of a deck, or its top cards when the message
+    carries a count. The client only says which pile it clicked and where: the
+    server puts each card back on the table under the pointer and in the hand
+    of the player, as an acquire would.
     """
     logger.debug("Process draw message")
     user, deck, pile = resolve_deck_action(self, message, "draw")
     if user is None:
         return
 
-    card = user.session.draw_from_deck(deck, pile, user, message.get("x"), message.get("y"))
-    if card is None:
+    cards = user.session.draw_cards_from_deck(
+        deck, pile, user, message.get("count", 1), message.get("x"), message.get("y")
+    )
+    if not cards:
         if deck.top(pile) is not None:
             # the top card belongs to another nationality
             self.send_error(
@@ -717,20 +828,27 @@ def draw(self, logger, message):
         return
 
     request_id = message.get("request_id")
-    # sent to everyone: each screen shows the card in the hand of the player
-    # who drew it. Its front stays on the server while it lies on its back.
-    user.session.send({
-        "event": "draw",
-        # who did it, by nickname: the user id alone names a connection
-        "nickname": user.name,
-        "component_id": deck.id,
-        "pile": pile,
-        "user": user.id,
-        # echoed as is, so the client recognises the answer to its own request
-        "request_id": request_id if isinstance(request_id, str) else None,
-        "component_json": card.return_json(),
-        "deck_json": deck.return_json(),
-    })
+    deck_json = deck.return_json()
+    # sent to everyone, one event for each card: each screen shows the card in
+    # the hand of the player who drew it. Its front stays on the server while
+    # it lies on its back.
+    for index, card in enumerate(cards):
+        user.session.send({
+            "event": "draw",
+            # who did it, by nickname: the user id alone names a connection
+            "nickname": user.name,
+            "component_id": deck.id,
+            "pile": pile,
+            "user": user.id,
+            # echoed as is, so the client recognises the answers to its own
+            # request: index counts them, from 0 to count - 1
+            "request_id": request_id if isinstance(request_id, str) else None,
+            "index": index,
+            "count": len(cards),
+            "component_json": card.return_json(),
+            # the deck once every card of this draw is out
+            "deck_json": deck_json,
+        })
 
 
 def shuffle(self, logger, message):
@@ -771,6 +889,57 @@ def refill(self, logger, message):
         "nickname": user.name,
         "deck_json": deck.return_json(),
     })
+
+
+def deal(self, logger, message):
+    """
+    Deals the top cards of a stack: one to the private hand of each player.
+    Nothing is dealt unless the stack holds a card for everybody.
+    """
+    logger.debug("Process deal message")
+    user, stack, _ = resolve_deck_action(self, message, "deal")
+    if user is None:
+        return
+
+    if stack.kind != 'stack':
+        self.send_error(
+            "component_not_a_stack",
+            f"Component {stack.id} is not a stack"
+        )
+        return
+
+    session = user.session
+    # the cards go to the private hands: a game without them deals nothing
+    if not session.private_hand_enabled():
+        self.send_error(
+            "private_hand_disabled",
+            "This game has no private hand"
+        )
+        return
+
+    dealt = session.deal_from_stack(stack)
+    if not dealt:
+        self.send_error(
+            "not_enough_cards",
+            f"Stack {stack.id} does not hold a card for each player"
+        )
+        return
+
+    deal_message = {
+        "event": "deal",
+        "component_id": stack.id,
+        "user": user.id,
+        # the nickname of the player, so every screen can say who dealt
+        "nickname": user.name,
+        "deck_json": stack.return_json(),
+        "hands": session.hands_json(),
+    }
+    # each player only reads the card it was dealt, with its front: the cards
+    # of the others stay unknown, down to their id
+    for recipient in session.players + session.watchers:
+        card = dealt.get(recipient.name) if recipient.role == "player" else None
+        cards = [card.return_json()] if card is not None else []
+        recipient.send(session.for_user(dict(deal_message, cards=cards), recipient))
 
 
 def move(self, logger, message):
@@ -1002,6 +1171,22 @@ def flip(self, logger, message):
         )
         return
 
+    # a player turns over what it keeps in its private hand, whatever happens
+    # on the table: nobody else sees it, so only that player is told
+    if user.session.hand_holding(component) == user.name:
+        component.flip()
+        user.send(user.session.for_user({
+            "event": "flip",
+            "component_id": component_id,
+            "side": component.side,
+            "front_src": component.image_src["front"],
+            "back_src": component.image_src["back"],
+        }, user))
+        # whoever reads that card in the area of the player sees it turn
+        if user.session.shown_by(component) == user.name:
+            user.session.send_show(user.name)
+        return
+
     # whoever may not take the token may not turn it over
     if refuse_modification(self, user, component):
         return
@@ -1018,6 +1203,43 @@ def flip(self, logger, message):
         "front_src": component.image_src["front"],
         "back_src": component.image_src["back"],
     })
+
+
+def order_players(self, logger, message):
+    """
+    The owner of the session changes the order the players are listed in.
+    Every screen gets the new list with a session_status.
+    """
+    logger.debug("Process order_players message")
+    user = self.factory.lobby.get_user(self)
+
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    session = user.session
+    if session is None:
+        self.send_error(
+            "no_session",
+            "The order_players action requires an active session"
+        )
+        return
+
+    if not session.is_owner(user):
+        self.send_error(
+            "not_session_owner",
+            "Only the owner of the session orders its players"
+        )
+        return
+
+    if not session.order_players(message.get("nicknames")):
+        self.send_error(
+            "unknown_player",
+            "The order_players message requires the nicknames of players of the game, each once"
+        )
+        return
+
+    session.send(session.return_status_json())
 
 
 def fix_positions(self, logger, message):

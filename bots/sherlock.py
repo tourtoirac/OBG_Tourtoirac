@@ -69,6 +69,9 @@ NEVER_PLAYED = {"alibi", "thick_fog", "mycroft"}
 # bot only tries it against a hand this small
 ARREST_MAX_HAND = 3
 
+# seconds a human is given to show its hand to the bot that looks at it
+SHOW_TIMEOUT = 120.0
+
 
 def location_type(card: str) -> str | None:
     if card in LONDON:
@@ -461,11 +464,13 @@ class Game:
     :param grace: seconds more left to a human who drew a card to play it
     """
 
-    def __init__(self, clients: list, operator: Operator | None = None, delay: float = 1.5, grace: float = 4.0):
+    def __init__(self, clients: list, operator: Operator | None = None, delay: float = 1.5, grace: float = 4.0,
+                 show_timeout: float = SHOW_TIMEOUT):
         self.operator = operator or Operator()
         self.clients = clients
         self.delay = delay
         self.grace = grace
+        self.show_timeout = show_timeout
         self.referee = Referee(self.operator, [client.nickname for client in clients])
         self.bots = {client.nickname: SherlockBot(client, self) for client in clients}
         # the referee watches the table through the first seat
@@ -482,7 +487,42 @@ class Game:
         bot = self.bots.get(target)
         if bot is not None:
             return any(name in VILLAINS for name in bot.client.hand_names())
+        shown = await self.read_shown_hand(accuser, target)
+        if shown is not None:
+            return any(name in VILLAINS for name in shown)
         return await self.operator.ask_guilty(accuser, target)
+
+    async def read_shown_hand(self, accuser: str, target: str) -> list | None:
+        """
+        Has a human show its hand to the bot looking at it, when the game
+        lets the players show their cards (show_hands_to_other_players).
+        :return: the names of the cards of the hand, or None when the game
+            has no such area or the human did not show its whole hand in time
+        """
+        reader = self.bots[accuser].client
+        if not reader.can_show_hands():
+            return None
+        count = reader.hand_counts.get(target, 0)
+        self.operator.say(
+            f"{target} : montre ta main à {accuser} (« Show hands to ... » → {accuser}, "
+            f"puis glisse tes {count} carte(s) face visible dans la zone)")
+
+        def whole_hand() -> bool:
+            names = reader.shown_names(target)
+            # a card lying on its back does not tell what it is
+            return len(names) >= count and all(name in POINTS for name in names)
+
+        if not await self.wait_until(whole_hand, timeout=self.show_timeout):
+            self.operator.say(f"{target} n'a pas montré toute sa main")
+            return None
+        names = reader.shown_names(target)
+        self.operator.say(f"{accuser} a vu la main de {target} : la zone peut être fermée")
+        return names
+
+    async def show_hand(self, bot: SherlockBot, to: str) -> None:
+        """A bot shows its whole hand to a player, or to "all" of them."""
+        await bot.client.show_hand(to)
+        self.operator.say(f"{bot.name} montre sa main à {'tous les joueurs' if to == 'all' else to}")
 
     async def give_hand(self, giver: str, receiver: SherlockBot) -> None:
         """
@@ -495,7 +535,8 @@ class Game:
             await self.dump_hand(bot)
         else:
             await self.operator.confirm(
-                f"{giver} : pose tes {count} carte(s) face cachée sur la table pour {receiver.name}")
+                f"{giver} : retourne tes {count} carte(s) dans ta main (double-clic), "
+                f"puis pose-les face cachée sur la table pour {receiver.name}")
         # the seat of the receiver may hear of these cards a moment later
         await self.wait_until(lambda: len(receiver.client.loose_cards()) >= count)
         for card in receiver.client.loose_cards():
@@ -506,7 +547,7 @@ class Game:
         """A bot lays its whole hand on the table, face down, in a row."""
         count = len(bot.client.hand)
         for index, card_id in enumerate(list(bot.client.hand)):
-            await bot.client.hand_to_table(card_id, 300 + index * 60, 950)
+            await bot.client.hand_to_table(card_id, 300 + index * 60, 950, face_down=True)
         return count
 
     # ------------------------------------------------------------------
@@ -537,9 +578,29 @@ class Game:
         for card in dealer.loose_cards():
             await dealer.table_to_pile(card, DEAL)
         await dealer.shuffle(PACK)
-        for _ in range(HAND_SIZE * len(players) - dealer.pile_count(DEAL)):
-            await dealer.draw_to_pile(PACK, "draw", DEAL)
+        await dealer.draw_to_pile(
+            PACK, "draw", DEAL, count=HAND_SIZE * len(players) - dealer.pile_count(DEAL))
         await dealer.shuffle(DEAL)
+        if dealer.is_stack(DEAL) and dealer.private_hand() is not None:
+            # a stack deals by itself: one card to every player, humans
+            # included, straight into the private hands
+            for _ in range(HAND_SIZE):
+                await dealer.deal(DEAL)
+            await self.wait_until(
+                lambda: all(len(bot.client.hand) >= HAND_SIZE for bot in self.bots.values()))
+        else:
+            await self._deal_by_hand(players)
+        while dealer.pile_count(VILLAIN_DECK) > 0:
+            await dealer.draw_to_pile(VILLAIN_DECK, "draw", PACK)
+        await dealer.shuffle(PACK)
+        self.operator.say("Mise en place terminée : celui qui a « The game is afoot! » la pose")
+
+    async def _deal_by_hand(self, players: list) -> None:
+        """
+        The deal when "Donne" is a plain deck: each bot draws its cards, and
+        the humans are asked to draw theirs.
+        """
+        dealer = self.watcher
         for bot in self.bots.values():
             for _ in range(HAND_SIZE):
                 await bot.client.draw_to_hand(DEAL)
@@ -549,10 +610,6 @@ class Game:
                 f"{', '.join(humans)} : piochez {HAND_SIZE} cartes chacun dans le paquet « Donne »")
             while dealer.pile_count(DEAL) > 0 and not self.stopped:
                 await self._wait_change()
-        while dealer.pile_count(VILLAIN_DECK) > 0:
-            await dealer.draw_to_pile(VILLAIN_DECK, "draw", PACK)
-        await dealer.shuffle(PACK)
-        self.operator.say("Mise en place terminée : celui qui a « The game is afoot! » la pose")
 
     # ------------------------------------------------------------------
     # the game

@@ -11,7 +11,7 @@ import json
 from Components.card import Card
 from Components.deck import DECK_GAP, Deck
 from handle_message import acquire, draw, flip, refill, release, shuffle, take
-from session import Session, duplicate_component_ids
+from session import DRAW_FAN, DRAW_MAX, Session, duplicate_component_ids
 from tests.test_bag import FakeProtocol, FakeUser, call, error_codes, movable_ids
 
 
@@ -32,7 +32,7 @@ def build_session(deck=None, movable=None, **extra):
         "game": {"max_players": 2, "max_watchers": 2},
         "fixed": [DECK if deck is None else deck],
         "movable": [JOKER, ARMY] if movable is None else movable,
-        "options": {"private_hand": True},
+        "options": {"private_hand": {}},
         **extra,
     }
     return Session(
@@ -112,7 +112,7 @@ class TestBuilding:
         assert duplicate_component_ids(game_json) == ["ace"]
 
     def test_anonymous_ids_rename_the_cards(self):
-        session = build_session(options={"anonymous_id": True, "private_hand": True})
+        session = build_session(options={"anonymous_id": True, "private_hand": {}})
         assert session.get_component("ace") is False
         assert len(pile_ids(session)) == 3
         assert not {"ace", "king", "queen", "joker"} & set(session.components_dict)
@@ -303,13 +303,65 @@ class TestPrivateHand:
         assert session.return_session_json(alice)["hand"][0]["front_src"] == "/queen.png"
         assert "/queen.png" not in json.dumps(session.return_session_json(bob))
 
-    def test_a_card_played_face_down_stays_unknown_to_the_others(self):
+    def test_a_card_joins_the_hand_face_up(self):
+        session = build_session()
+        protocol, alice, _, bob = two_players(session)
+        self.keep_top_card(session, protocol)
+        assert session.get_component("queen").side == "front"
+        assert alice.sent[-1]["component_json"]["side"] == "front"
+        assert session.return_session_json(alice)["hand"][0]["side"] == "front"
+
+    def test_a_card_is_played_face_up_without_being_turned_over(self):
         session = build_session()
         protocol, _, _, bob = two_players(session)
         self.keep_top_card(session, protocol)
         call(take, protocol, "queen", x=300, y=300)
         assert bob.sent[-1]["event"] == "take"
+        assert bob.sent[-1]["component_json"]["side"] == "front"
+        assert bob.sent[-1]["component_json"]["front_src"] == "/queen.png"
+
+    def test_the_holder_turns_a_card_over_in_its_hand(self):
+        session = build_session()
+        protocol, alice, _, bob = two_players(session)
+        self.keep_top_card(session, protocol)
+        told = len(bob.sent)
+        call(flip, protocol, "queen")
+        assert session.get_component("queen").side == "back"
+        # the holder still reads both faces, and nobody else is told
+        assert alice.sent[-1] == {"event": "flip", "component_id": "queen", "side": "back",
+                                  "front_src": "/queen.png", "back_src": "/back.png"}
+        assert len(bob.sent) == told
+        call(flip, protocol, "queen")
+        assert session.get_component("queen").side == "front"
+
+    def test_a_card_turned_over_in_the_hand_is_played_face_down(self):
+        session = build_session()
+        protocol, _, _, bob = two_players(session)
+        self.keep_top_card(session, protocol)
+        call(flip, protocol, "queen")
+        call(take, protocol, "queen", x=300, y=300)
+        assert bob.sent[-1]["event"] == "take"
+        assert bob.sent[-1]["component_json"]["side"] == "back"
         assert bob.sent[-1]["component_json"]["front_src"] is None
+
+    def test_another_player_does_not_turn_over_a_card_of_a_hand(self):
+        session = build_session()
+        protocol, _, other, _ = two_players(session)
+        self.keep_top_card(session, protocol)
+        call(flip, other, "queen")
+        assert error_codes(other) == ["component_in_hand"]
+        assert session.get_component("queen").side == "front"
+
+    def test_a_resumed_hand_keeps_the_side_of_its_cards(self):
+        session = build_session()
+        protocol, *_ = two_players(session)
+        self.keep_top_card(session, protocol)
+        call(flip, protocol, "queen")
+        resumed = Session(
+            user=None, name="JudgeDredd", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=session.game_json_state(), started=True,
+        )
+        assert resumed.hands["alice"][0].side == "back"
 
 
 class TestSavedState:
@@ -339,3 +391,69 @@ class TestSavedState:
         assert resumed.get_component("joker").side == "front"
         assert [card.id for card in resumed.hands["alice"]] == ["queen"]
         assert isinstance(resumed.get_component("queen"), Card)
+
+
+class TestDrawingSeveralCards:
+    def test_a_count_takes_that_many_cards_from_the_top(self):
+        session = build_session()
+        protocol, alice, _, bob = two_players(session)
+        call(draw, protocol, "deck", count=2, x=300, y=300, request_id="r1")
+        assert pile_ids(session) == ["ace"]
+        events = [event for event in bob.sent if event["event"] == "draw"]
+        assert [event["component_json"]["id"] for event in events] == ["queen", "king"]
+        assert [(event["index"], event["count"], event["request_id"]) for event in events] == [
+            (0, 2, "r1"), (1, 2, "r1"),
+        ]
+        assert all(event["deck_json"]["piles"]["draw"]["count"] == 1 for event in events)
+        assert movable_ids(session)[-2:] == ["queen", "king"]
+        assert all(session.get_component(name).acquired_by is alice for name in ("queen", "king"))
+
+    def test_the_cards_come_out_side_by_side(self):
+        session = build_session()
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=2, x=300, y=300)
+        queen, king = session.get_component("queen"), session.get_component("king")
+        assert (queen.x, queen.y) == (270, 255)
+        assert (king.x, king.y) == (270 + DRAW_FAN, 255)
+
+    def test_without_a_point_they_fan_from_the_pile(self):
+        session = build_session()
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=2)
+        queen, king = session.get_component("queen"), session.get_component("king")
+        assert (queen.x, queen.y) == (100, 100)
+        assert (king.x, king.y) == (100 + DRAW_FAN, 100)
+
+    def test_a_short_pile_gives_what_it_holds(self):
+        session = build_session()
+        protocol, alice, _, _ = two_players(session)
+        call(draw, protocol, "deck", count=5)
+        assert pile_ids(session) == []
+        assert [event["count"] for event in alice.sent if event["event"] == "draw"] == [3, 3, 3]
+        assert error_codes(protocol) == []
+
+    def test_no_more_than_the_maximum_comes_out(self):
+        cards = [card_json(f"card-{index}") for index in range(DRAW_MAX + 5)]
+        session = build_session(dict(DECK, components=cards))
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=500)
+        assert len(pile_ids(session)) == 5
+
+    def test_a_count_that_is_no_number_draws_one_card(self):
+        for count in (0, -3, "5", 2.5, True, None):
+            session = build_session()
+            protocol, *_ = two_players(session)
+            call(draw, protocol, "deck", count=count)
+            assert pile_ids(session) == ["ace", "king"]
+
+    def test_an_empty_pile_still_answers_pile_empty(self):
+        session = build_session(dict(DECK, components=[]))
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=5)
+        assert error_codes(protocol) == ["pile_empty"]
+
+    def test_a_single_draw_carries_its_index_too(self):
+        session = build_session()
+        protocol, alice, _, _ = two_players(session)
+        call(draw, protocol, "deck")
+        assert (alice.sent[-1]["index"], alice.sent[-1]["count"]) == (0, 1)

@@ -18,7 +18,7 @@ def build_session(**extra):
         "game": {"max_players": 2, "max_watchers": 2},
         "fixed": [],
         "movable": [ARMY, SCOUT],
-        "options": {"private_hand": True},
+        "options": {"private_hand": {}},
         **extra,
     }
     return Session(
@@ -92,9 +92,31 @@ class TestKeeping:
         protocol, _, other, _ = two_players(session)
         keep(protocol, "army")
         call(acquire, other, "army")
-        call(flip, protocol, "army")
-        assert error_codes(other) == ["component_in_hand"]
+        call(flip, other, "army")
+        call(acquire, protocol, "army")
+        assert error_codes(other) == ["component_in_hand", "component_in_hand"]
         assert error_codes(protocol) == ["component_in_hand"]
+
+    def test_the_holder_turns_over_a_token_of_its_hand(self):
+        session = build_session()
+        protocol, alice, _, bob = two_players(session)
+        keep(protocol, "army")
+        told = len(bob.sent)
+        call(flip, protocol, "army")
+        assert error_codes(protocol) == []
+        assert session.get_component("army").side == "back"
+        assert alice.sent[-1]["event"] == "flip"
+        assert alice.sent[-1]["side"] == "back"
+        # nobody else is told: the hand is private
+        assert len(bob.sent) == told
+
+    def test_a_token_keeps_its_side_when_it_joins_a_hand(self):
+        session = build_session()
+        protocol, _, _, _ = two_players(session)
+        call(acquire, protocol, "army")
+        call(flip, protocol, "army")
+        call(release, protocol, "army", x=0, y=0, hand=True)
+        assert session.get_component("army").side == "back"
 
 
 class TestPlaying:
@@ -184,10 +206,11 @@ class TestDescribing:
 
 
 class TestOption:
-    """The private hand only exists when options.private_hand is true."""
+    """The private hand only exists when options.private_hand is an object."""
 
     def test_without_the_option_a_token_released_to_the_hand_stays_on_the_table(self):
-        for options in ({}, {"private_hand": False}, {"private_hand": "true"}):
+        for options in ({}, {"private_hand": None}, {"private_hand": False},
+                        {"private_hand": True}, {"private_hand": "true"}):
             session = build_session(options=options)
             protocol, _, _, bob = two_players(session)
             call(acquire, protocol, "army")
@@ -198,8 +221,15 @@ class TestOption:
             assert "army" in movable_ids(session)
             assert bob.sent[-1]["hand_of"] is None
 
+    def test_an_object_turns_the_private_hand_on(self):
+        for value in ({}, {"anything": 1}):
+            session = build_session(options={"private_hand": value})
+            protocol, _, _, _ = two_players(session)
+            keep(protocol, "army")
+            assert list(session.hands) == ["alice"]
+
     def test_without_the_option_nothing_is_taken_from_a_hand(self):
-        session = build_session(options={"private_hand": False})
+        session = build_session(options={"private_hand": None})
         protocol, *_ = two_players(session)
         call(take, protocol, "army", x=0, y=0)
         assert error_codes(protocol) == ["private_hand_disabled"]

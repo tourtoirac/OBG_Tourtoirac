@@ -9,6 +9,7 @@ from Components.counter import Counter, DEFAULT_COUNTER_COLOR
 from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
+from Components.stack import Stack
 from Components.token import Token
 
 import uuid
@@ -32,6 +33,14 @@ MOVABLE_KINDS = ('token', 'card')
 # the lists of a deck description holding its cards: the draw pile, then the
 # discard pile a saved state adds
 DECK_CARD_LISTS = ('components', 'discard')
+
+# the most cards one draw action takes out of a pile, and how far apart, in
+# pixels, they come out: side by side, so the player sees how many it holds
+DRAW_MAX = 10
+DRAW_FAN = 20
+
+# the kinds holding cards: a stack is a deck of one pile that deals its cards
+DECK_KINDS = ('deck', 'stack')
 
 
 def read_coordinate(value):
@@ -258,7 +267,7 @@ def anonymize_ids(game_json: dict) -> dict:
             return component
         if component.get('kind') == 'bag':
             return dict(component, components=anonymized(component.get('components')))
-        if component.get('kind') == 'deck':
+        if component.get('kind') in DECK_KINDS:
             return dict(component, **{
                 key: anonymized(component[key])
                 for key in DECK_CARD_LISTS if isinstance(component.get(key), list)
@@ -314,7 +323,7 @@ def duplicate_component_ids(game_json: dict) -> list:
             elif component.get('kind') == 'bag' and isinstance(component.get('components'), list):
                 # the tokens of a bag may ask for copies too
                 nested = expand_components(component['components'])
-            elif component.get('kind') == 'deck':
+            elif component.get('kind') in DECK_KINDS:
                 # and so may the cards of a deck, in either of its piles
                 nested = [
                     card
@@ -398,6 +407,14 @@ class Session:
         # connectes ou non. Une partie commencee attend qu'ils soient tous la
         # avant de laisser prendre un pion.
         self.player_names = list(player_names or [])
+        # the order the players are listed in: the one they joined the game
+        # in, unless the owner changed it. Saved with the state (player_order).
+        saved_order = game_json.get('player_order')
+        self.player_order = [
+            name for name in (saved_order if isinstance(saved_order, list) else [])
+            if isinstance(name, str)
+        ]
+        self.remember_player_order(self.player_names)
         # nationalities: the sides the game declares, empty for a game without
         # any. No rule depends on them yet: they are only carried to the clients.
         self.nationalities = read_nationalities(game_json)
@@ -410,6 +427,10 @@ class Session:
         # nickname. The seat holds the hand, not the connection: it is still
         # there when the player comes back.
         self.hands = {}
+        # what the players show of their hand, by nickname of the owner:
+        # {"to": "all" or a nickname, "cards": [components of that hand]}.
+        # Never saved: a resumed session finds every card back in its hand.
+        self.shows = {}
         self.load_session_components()
         self.load_hands(game_json.get('hands'))
         # does a token of this game belong to a nationality, or is it a card ?
@@ -474,7 +495,7 @@ class Session:
                             game_component = self.build_bag(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
-                        case 'deck' if list_name == 'fixed':
+                        case 'deck' | 'stack' if list_name == 'fixed':
                             game_component = self.build_deck(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
@@ -587,7 +608,8 @@ class Session:
 
         "components" lists the cards of the draw pile, the last one on top.
         "discard" lists those of the discard pile: a game seldom declares it,
-        a saved state does.
+        a saved state does. "shuffle_at_startup" set to true shuffles the draw
+        pile once, when the game is launched.
         :param component: the deck description from the game_json
         """
         piles = {}
@@ -602,6 +624,34 @@ class Session:
             ]
             for card in piles[key]:
                 self.components_dict[card.id] = card
+        deck = self.new_deck(component, piles)
+        # shuffle_at_startup: only true shuffles the draw pile when the game
+        # is launched. The saved state never carries the key (state_json), so
+        # a resumed session keeps the order its cards had.
+        if component.get('shuffle_at_startup') is True:
+            deck.shuffle('draw')
+        return deck
+
+    @staticmethod
+    def new_deck(component: dict, piles: dict) -> Deck:
+        """
+        The deck or the stack a description asks for, holding the cards
+        already built from it.
+        :param piles: the cards of each list of DECK_CARD_LISTS
+        """
+        if component.get('kind') == 'stack':
+            # a stack has one single pile: cards a description would list as
+            # discarded go on top of the others
+            return Stack(
+                component['id'],
+                component['x'],
+                component['y'],
+                component['width'],
+                component['height'],
+                component.get('back_src'),
+                piles['components'] + piles['discard'],
+                component.get('text'),
+            )
         return Deck(
             component['id'],
             component['x'],
@@ -683,6 +733,53 @@ class Session:
         card.acquire(user)
         return card
 
+    def draw_cards_from_deck(self, deck: Deck, pile: str, user: User, count=1, x=None, y=None) -> list:
+        """
+        Takes the top cards of a pile, one after the other, and puts them all
+        in the hand of user. They come out fanned to the right of (x, y), the
+        top card of the pile first, so it ends up under the others.
+        :param count: how many cards are asked for, DRAW_MAX at most; anything
+            that is not a whole number above zero counts as one
+        :return: the cards drawn, fewer than asked when the pile runs out or
+            shows a card user may not take, empty when it gives none
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            count = 1
+        has_point = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y))
+        cards = []
+        for index in range(min(count, DRAW_MAX)):
+            card = self.draw_from_deck(deck, pile, user, x + index * DRAW_FAN if has_point else None, y)
+            if card is None:
+                break
+            if not has_point:
+                card.x += index * DRAW_FAN
+                card.coordinates = (card.x, card.y)
+            cards.append(card)
+        return cards
+
+    def dealt_players(self) -> list:
+        """
+        The players a stack deals to: every seat of the game, then the players
+        at the table without a known seat. The hand belongs to the seat, so a
+        nickname is enough.
+        :return: their nicknames, in the order of the seats
+        """
+        return self.ordered_seats()
+
+    def deal_from_stack(self, stack: Stack) -> dict:
+        """
+        Deals one card of a stack to the private hand of each player, from the
+        top of the stack down, in the order of the seats. The cards never
+        touch the table: they keep the back they showed in the stack.
+        :return: {nickname: card}, empty when the stack does not hold one card
+            for each player, in which case nothing moves
+        """
+        names = self.dealt_players()
+        dealt = dict(zip(names, stack.deal(len(names))))
+        for nickname, card in dealt.items():
+            self.enter_hand(nickname, card)
+        return dealt
+
     def build_bag(self, component: dict) -> Bag:
         """
         Builds a bag and indexes each of its tokens by its own id. The tokens
@@ -743,9 +840,111 @@ class Session:
     def private_hand_enabled(self) -> bool:
         """
         A game turns the private hands on by setting options.private_hand to
-        true. Absent or anything else, nobody keeps a token off the table.
+        an object, even an empty one. Absent, null or anything else, nobody
+        keeps a token off the table.
         """
-        return self.options.get("private_hand") is True
+        return isinstance(self.options.get("private_hand"), dict)
+
+    def show_hands_enabled(self) -> bool:
+        """
+        A game lets its players show cards of their hand to the others by
+        setting options.private_hand.show_hands_to_other_players to true.
+        """
+        private_hand = self.options.get("private_hand")
+        return isinstance(private_hand, dict) and private_hand.get("show_hands_to_other_players") is True
+
+    def open_show(self, nickname: str, to) -> bool:
+        """
+        Opens the area a player shows cards of its hand in, or changes who
+        reads it; the cards already shown stay.
+        :param to: "all" for every player, or the nickname of another player
+        :return: False when to names nobody the hand can be shown to
+        """
+        if to != "all" and (to == nickname or to not in self.dealt_players()):
+            return False
+        self.shows.setdefault(nickname, {"cards": []})["to"] = to
+        return True
+
+    def add_to_show(self, nickname: str, component) -> bool:
+        """
+        Shows one more component of the hand of a player. It stays in that
+        hand: it is only read by more people.
+        :return: False when the player shows nothing, or does not hold it
+        """
+        show = self.shows.get(nickname)
+        if show is None or self.hand_holding(component) != nickname:
+            return False
+        if not any(component is card for card in show["cards"]):
+            show["cards"].append(component)
+        return True
+
+    def close_show(self, nickname: str) -> bool:
+        """
+        Closes the area of a player: its cards are only in the hand again.
+        :return: False when that player was showing nothing
+        """
+        return self.shows.pop(nickname, None) is not None
+
+    def shown_by(self, component) -> str | None:
+        """
+        The nickname of the player showing a component, or None.
+        """
+        for nickname, show in self.shows.items():
+            if any(component is card for card in show["cards"]):
+                return nickname
+        return None
+
+    def reads_show_of(self, user, nickname: str) -> bool:
+        """
+        Whether user reads what a player shows: that player, and the players
+        it shows its cards to. A watcher never does.
+        """
+        show = self.shows.get(nickname)
+        if show is None or getattr(user, 'role', None) != 'player':
+            return False
+        return user.name == nickname or show["to"] in ("all", user.name)
+
+    def show_json(self, nickname: str, user) -> dict:
+        """
+        What user reads of the cards a player shows: each one as it is, on
+        the side its owner left it. Whoever may not read them is told the
+        area is closed.
+        :return: {"event": "show", "owner", "to", "cards", "component_ids"};
+            "to" is None when nothing is shown to user, and only the owner
+            gets the ids of its cards
+        """
+        closed = {"event": "show", "owner": nickname, "to": None, "cards": [], "component_ids": []}
+        if not self.reads_show_of(user, nickname):
+            return closed
+        show = self.shows[nickname]
+        return dict(
+            closed,
+            to=show["to"],
+            cards=[
+                {"src": card.image_src[card.side], "width": card.width, "height": card.height}
+                for card in show["cards"]
+            ],
+            component_ids=[card.id for card in show["cards"]] if user.name == nickname else [],
+        )
+
+    def shows_json(self, user) -> list:
+        """
+        Every area user reads, its own first if any.
+        """
+        return [
+            self.show_json(nickname, user)
+            for nickname in sorted(self.shows, key=lambda name: name != getattr(user, 'name', None))
+            if self.reads_show_of(user, nickname)
+        ]
+
+    def send_show(self, nickname: str) -> None:
+        """
+        Tells each player what it now reads of the area of a player. Not sent
+        through send(): the faces are meant to be read here, and the watchers
+        are told nothing.
+        """
+        for user in self.players:
+            user.send(self.show_json(nickname, user))
 
     def hand_holding(self, component) -> str | None:
         """
@@ -766,7 +965,19 @@ class Session:
         if component in movable:
             movable.remove(component)
         component.leave_table()
-        self.hands.setdefault(user.name, []).append(component)
+        self.enter_hand(user.name, component)
+
+    def enter_hand(self, nickname: str, component) -> None:
+        """
+        Adds a component to the private hand of a player. A card joins it face
+        up: its holder reads it at once, and it will show that face when it is
+        played, unless the holder turns it over in the hand before. The other
+        players never read the front of a card held in a hand (for_user).
+        """
+        if isinstance(component, Card):
+            # a card without a back has one single face and keeps it
+            component.set_side('front')
+        self.hands.setdefault(nickname, []).append(component)
 
     def take_from_hand(self, user: User, component, x=None, y=None) -> bool:
         """
@@ -781,6 +992,10 @@ class Session:
         held.remove(component)
         if not held:
             del self.hands[user.name]
+        # a card played is no longer shown from the hand
+        show = self.shows.get(user.name)
+        if show is not None:
+            show["cards"] = [card for card in show["cards"] if card is not component]
         if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
             x = component.width / 2
             y = component.height / 2
@@ -1035,6 +1250,10 @@ class Session:
         # une liste "dice" dédiée n'est écrite que si le jeu en a une
         if dice_by_origin['dice'] or 'dice' in state:
             state['dice'] = dice_by_origin['dice']
+        # the order the players are listed in survives the session
+        state.pop('player_order', None)
+        if self.player_order:
+            state['player_order'] = list(self.player_order)
         # the private hands are stored by nickname, and only when there are any
         state.pop('hands', None)
         if self.hands:
@@ -1096,6 +1315,21 @@ class Session:
             return is_player and self.hand_holding(token) == user.name
         return True
 
+    @staticmethod
+    def reads_hand_of(user, nickname) -> bool:
+        """
+        Whether user may read what the private hand of nickname holds: only
+        the player of that seat does. Always true for None, the hand of
+        nobody: the component is not in a hand.
+        """
+        if nickname is None:
+            return True
+        return (
+            user is not None
+            and getattr(user, 'role', None) == 'player'
+            and user.name == nickname
+        )
+
     def _pending_sides(self) -> dict:
         """
         The side the setup is about to give each token it turns over. Until
@@ -1144,6 +1378,10 @@ class Session:
                     side = pending
                 if not self.sees_hidden_face(user, token, side):
                     cleaned[HIDDEN_FACE_FIELDS.get(side, 'back_src')] = None
+                # a card kept in a private hand lies face up there, but only
+                # its holder reads that face
+                if isinstance(token, Card) and not self.reads_hand_of(user, self.hand_holding(token)):
+                    cleaned['front_src'] = None
         return cleaned
 
     def return_session_json(self, user=None) -> dict:
@@ -1181,6 +1419,9 @@ class Session:
         # reader, with its faces
         session_json["hands"] = self.hands_json()
         session_json["hand"] = self.hand_json(user)
+        # shows: the cards the players show of their hand, as far as the
+        # reader may read them
+        session_json["shows"] = self.shows_json(user)
         if user is not None:
             session_json["components"] = self.for_user(session_json["components"], user)
             session_json["hand"] = self.for_user(session_json["hand"], user)
@@ -1194,8 +1435,43 @@ class Session:
         """
         self.started = self.started or bool(started)
         self.player_names = list(player_names)
+        self.remember_player_order(self.player_names)
         if player_nationalities is not None:
             self.player_nationalities = dict(player_nationalities)
+
+    def remember_player_order(self, names) -> None:
+        """
+        A player met for the first time is listed after those already known:
+        the order of arrival, which later arrivals never change.
+        """
+        for name in names:
+            if name not in self.player_order:
+                self.player_order.append(name)
+
+    def ordered_seats(self) -> list:
+        """
+        The seats of the game, then the players at the table without a known
+        seat, in the order they are listed in (player_order).
+        """
+        seats = list(self.player_names)
+        seats += [user.name for user in self.players if user.name not in seats]
+        self.remember_player_order(seats)
+        return sorted(seats, key=self.player_order.index)
+
+    def order_players(self, nicknames) -> bool:
+        """
+        Lists the players in the order the owner asked for. The players it did
+        not name keep their order, after the others.
+        :return: False when nicknames is not a list of players of the game,
+            each named once
+        """
+        seats = self.ordered_seats()
+        if (not isinstance(nicknames, list) or len(set(map(str, nicknames))) != len(nicknames)
+                or any(name not in seats for name in nicknames)):
+            return False
+        named = list(nicknames)
+        self.player_order = named + [name for name in self.player_order if name not in named]
+        return True
 
     def missing_players(self) -> list:
         """
@@ -1216,8 +1492,7 @@ class Session:
         connected = [user.name for user in self.players]
         watching = [user.name for user in self.watchers]
         # without a list of seats, the players at the table are all we know
-        seats = list(self.player_names)
-        seats += [name for name in connected if name not in seats]
+        seats = self.ordered_seats()
         listed = []
         for name in seats:
             # a closed game turned its players into watchers: they keep their

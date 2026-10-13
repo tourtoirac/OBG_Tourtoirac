@@ -26,10 +26,10 @@ cache : `python3 -m pytest -p no:cacheprovider`.
 
 Aucune CI : `pytest` est le seul garde-fou.
 
-## État de la suite (vérifié le 12/10/2026)
+## État de la suite (vérifié le 13/10/2026)
 
 ```
-573 passed, 2 failed, 6 skipped
+638 passed, 2 failed, 6 skipped
 ```
 
 Les 2 échecs sont **préexistants et hors sujet** : `tests/test_chabanas.py`.
@@ -54,7 +54,7 @@ ni réseau ni service externe ne sont requis.
 | `main.py`              | `GameWebSocketProtocol`, dispatch, démarrage (`main`, `start_server`) |
 | `handle_message.py`    | Dispatch : un handler par action |
 | `session.py`           | **Cœur** : état de la partie, composants, diffusion |
-| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `dice_pool`, `token`, `component`, `hex_grid` |
+| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `dice_pool`, `stack`, `token`, `component`, `hex_grid` |
 | `chabanas.py`          | Client HTTP vers le back-end, via `IBodyProducer` |
 | `lobby.py` `user.py`   | Lobby et utilisateur connecté |
 | `player_sim.py`        | Simulateur de joueur, pour essai manuel |
@@ -111,9 +111,11 @@ leur attache un errback de journalisation.
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
 | `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`) | session |
 | `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` | session |
-| `draw` `{component_id, pile?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, component_json, deck_json}` | session |
+| `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
 | `shuffle` `{component_id, pile?}` | `shuffle` `{component_id, pile, user, nickname, deck_json}` | session |
 | `refill` `{component_id}` | `refill` `{component_id, user, nickname, deck_json}` | session |
+| `deal` `{component_id}` | `deal` `{component_id, user, nickname, deck_json, hands, cards}` ; `cards` diffère selon le destinataire | session |
+| `show_open` `{to}`, `show_add` `{component_id}`, `show_close` | `show` `{owner, to, cards, component_ids}` ; contenu différent selon le destinataire | joueurs seulement |
 | ↳ `acquire` refusé | `error` `session_not_started` / `players_missing` | appelant |
 | `move` | `move` `{component_id, coordinates}` | session |
 | `roll` | `roll` `{src, cooldown_seconds}` | session |
@@ -122,6 +124,7 @@ leur attache un errback de journalisation.
 | `flip` | `flip` `{side, front_src, back_src}` | session |
 | `increment` / `decrement` | `counter_value` `{value}` | session |
 | `fix_positions` | `fix_positions` `{components}` | session |
+| `order_players` `{nicknames}` (owner seulement) | `session_status` | session |
 | `apply_setup` | `setup` `{components}` | session |
 | (arrêt du réacteur) | `server_shutdown` | tous |
 
@@ -173,7 +176,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que neuf `kind` :
+`Session.load_session_components` ne reconnaît que dix `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
@@ -185,7 +188,8 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 | `bag` | `Bag` | `fixed` | sac de pions tirés au hasard (voir § Sac) ; uniquement s'il est déclaré dans `fixed` |
 | `token` | `Token` | `movable` | uniquement s'il est déclaré dans `movable` (ou dans un `bag`) |
 | `deck` | `Deck` | `fixed` | paquet de cartes `single` ou `duo` (voir § Paquet de cartes) ; uniquement s'il est déclaré dans `fixed` |
-| `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck`) |
+| `stack` | `Stack` | `fixed` | sous-classe de `Deck` à une seule pile, qui distribue (voir § Pile qui distribue) ; uniquement s'il est déclaré dans `fixed` |
+| `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck` / `stack`) |
 
 Un `kind` inconnu est ignoré sans erreur.
 
@@ -206,7 +210,7 @@ est notre **`Token`**, et son `CounterBox` est notre **`Counter`**.
 
 Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `pick`, `move`,
-`draw`, `shuffle`, `refill`,
+`draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`.
 
@@ -331,6 +335,17 @@ spectateurs reçoivent `null` à la place (`Session.sees_hidden_face`).
 dans chaque `session_status`, donc à chaque arrivée ou départ ; la clôture
 renvoie aussi un `session_status`, les joueurs y gardant leur ligne de joueur.
 
+Ordre des joueurs : `Session.player_order`, l'ordre dans lequel les joueurs
+ont été connus (`remember_player_order` : un nouveau venu passe après les
+autres, et n'est jamais déplacé ensuite), sauf si l'owner l'a changé.
+`ordered_seats()` l'applique à `participants()` et à `dealt_players()`.
+`game_json_state` l'écrit à la racine (`player_order`), relu à la
+construction de la session. L'action `order_players` `{nicknames}` est
+réservée à l'owner (`not_session_owner`) ; les pseudos doivent être des
+joueurs de la partie, chacun une fois (`unknown_player`) ; ceux qui ne sont
+pas nommés gardent leur ordre, après les autres. Chabanas renvoie les sièges
+par ordre d'arrivée (`player_set.order_by('id')`).
+
 ## Documents (`documents`)
 
 Clé **facultative, à la racine** du `game_json` (pas dans `options`) :
@@ -367,7 +382,8 @@ refusée avec `fix_positions_disabled`) ; absente ou `true`, elle reste permise.
 Une partie sauvegardée avant que l'option devienne un booléen peut encore
 porter `null` (désactivé) ou une position `{x, y}` (permis).
 `options.screen_capture` (`null` ou `false` masque le bouton « Copie d'écran »)
-n'est lu que par Raffaillac.
+n'est lu que par Raffaillac, comme `options.border_shift` (seul `true` active
+le défilement de la vue au bord de l'écran).
 
 ## Copies d'un pion (`copies`)
 
@@ -520,7 +536,8 @@ directement dans la main du joueur.
 
 ## Main privée (`hands`)
 
-**Active seulement si `options.private_hand` vaut `true`**
+**Active seulement si `options.private_hand` est un objet, même vide `{}`**
+(`null`, absent ou toute autre valeur, `true` compris : pas de main)
 (`Session.private_hand_enabled`). Sinon un `release` avec `"hand": true` pose
 le pion là où il est relâché, et `take` répond `private_hand_disabled`.
 
@@ -538,7 +555,12 @@ Chaque joueur garde hors de la table des pions que lui seul connaît.
   `x`/`y`, acquis par l'appelant. Événement `take` (`hand_of`, `hands`,
   `request_id`, `component_json`). Erreur : `component_not_in_hand`.
 - `acquire`, `flip` et `rotate` sur un pion en main sont refusés
-  (`component_in_hand`, dans `refuse_modification`).
+  (`component_in_hand`, dans `refuse_modification`). **Exception** : le
+  détenteur retourne ce qu'il garde dans **sa** main (`flip`, traité avant
+  `refuse_modification`). L'événement `flip` n'est alors envoyé qu'à lui.
+- `Session.enter_hand` est le seul point d'entrée dans une main (`release`
+  et `deal`) : une **carte** y passe face visible (`side` `front`) ; un pion
+  garde sa face. Le pion ou la carte est rejoué sur la face qu'il a en main.
 - Ce que tout le monde lit : `hands_json()` → `{pseudo: [{src, width,
   height}]}`, le **dos** de chaque pion, sans `id` ni face. `src` vaut `None`
   pour un pion sans dos ou qui porte une nationalité. Il part dans
@@ -548,6 +570,34 @@ Chaque joueur garde hors de la table des pions que lui seul connaît.
 - `game_json_state` écrit `hands` à la racine quand il y en a ; `load_hands`
   le relit à la reprise. Un `game_json` de jeu n'en déclare pas.
 - Le setup ignore `x`/`y` d'un pion en main, comme pour un sac.
+
+### Montrer des cartes de sa main (`shows`)
+
+Actif seulement si `options.private_hand.show_hands_to_other_players` vaut
+`true` (`Session.show_hands_enabled`) ; sinon `show_hands_disabled`.
+
+- `Session.shows` : `{pseudo: {"to": "all" | pseudo, "cards": [composants]}}`.
+  Les cartes montrées **restent dans `hands`** : elles sont seulement lues par
+  plus de monde. Fermer la zone (`close_show`) suffit donc à les « rendre ».
+- `shows` n'est **jamais sauvegardé** : à la reprise, toutes les cartes sont
+  en main et aucune zone n'est ouverte.
+- `show_open` `{to}` : `"all"` ou le pseudo d'un autre joueur
+  (`dealt_players`), sinon `unknown_player`. Redemandé, il change le
+  destinataire en gardant les cartes. `show_add` : `show_not_open`,
+  `component_not_in_hand`. `show_close` sans zone ouverte ne dit rien.
+- `show_json(pseudo, user)` : chaque carte **telle quelle**, sur la face que
+  son détenteur lui a laissée (`{src, width, height}`, sans id) ; seul le
+  détenteur reçoit `component_ids`. Qui ne lit pas la zone reçoit
+  `to: null` et aucune carte (`reads_show_of` : le détenteur, le
+  destinataire, ou tous les joueurs ; jamais un spectateur).
+- `send_show` écrit directement à chaque joueur, **sans `Session.send`** ni
+  `for_user` (les faces sont faites pour être lues) ; les spectateurs ne
+  reçoivent rien.
+- Retourner une carte montrée (`flip` en main) et la jouer (`take`)
+  renvoient un `show` ; `take_from_hand` la retire de la zone.
+- `return_session_json(user)["shows"]` : les zones que `user` lit, la sienne
+  d'abord.
+- Tests : `tests/test_show_hands.py`.
 
 ## Paquet de cartes (`deck`) et carte (`card`)
 
@@ -583,11 +633,25 @@ et une défausse `discard`). Tout autre `type` vaut `single`.
   pile `pile` (`draw` par défaut), acquise par l'appelant et centrée sur
   `x`/`y`, sur la face qu'elle avait dans la pile. Erreurs : `pile_empty`,
   `unknown_pile`, `component_not_a_deck`, `wrong_nationality`.
+- `draw` avec `count` (`Session.draw_cards_from_deck`) sort plusieurs cartes
+  du dessus, `DRAW_MAX` (10) au plus ; une valeur qui n'est pas un entier ≥ 1
+  vaut 1. Une pile trop courte donne ce qu'elle a. Le serveur envoie **un
+  événement `draw` par carte**, avec le même `request_id`, `index` (0 à
+  `count` − 1) et `count` (le nombre réellement sorti) ; `deck_json` y est
+  le paquet une fois toutes les cartes sorties. Les cartes arrivent en
+  éventail, décalées de `DRAW_FAN` (20 px) vers la droite.
 - `shuffle` mélange une pile ; `refill` remet la défausse **sous** la pioche,
   face cachée, **sans mélanger**. `resolve_deck_action` est leur préambule
   commun (joueur, `acquire_refusal`, `deck`, pile connue).
 - `acquire`, `flip`, `rotate` sur une carte d'un paquet : `component_in_deck`
   (`refuse_modification`).
+- `shuffle_at_startup` (facultatif, `deck` et `stack`) : seul le booléen
+  `true` fait mélanger la **pioche** à la construction du paquet
+  (`Session.build_deck`), donc au lancement de la partie. La clé n'est
+  **jamais sauvegardée** (`state_json` ne l'écrit pas, comme `copies`) : une
+  reprise garde l'ordre des cartes. Une session perdue avant sa première
+  sauvegarde est mélangée à nouveau. La défausse n'est pas mélangée, et le
+  client ne reçoit pas la clé.
 - **Les cartes ne quittent pas le serveur** : `Deck.return_json()` ne donne
   que `piles` → `{x, y, count, top: {src, width, height}}` (le dos pour la
   pioche, la face pour la défausse). `Deck.state_json()` écrit les cartes
@@ -600,8 +664,48 @@ et une défausse `discard`). Tout autre `type` vaut `single`.
   qui la pioche, jusqu'à ce qu'il la retourne (tout le monde la voit) ou la
   mette dans sa main (lui seul). `hides_faces` est vrai dès qu'il y a une
   carte.
+- **Carte en main** : elle y est face visible, mais `for_user` retire son
+  `front_src` pour tout autre que son détenteur (`Session.reads_hand_of`),
+  quelle que soit sa face. Posée depuis la main (`take`), elle arrive sur la
+  table face visible, sauf si son détenteur l'a retournée en main.
 - Limite : l'`id` de la carte part avec elle. Un client modifié peut donc
   reconnaître une carte déjà vue, même après un mélange.
+
+## Pile qui distribue (`stack`)
+
+Un `stack` (`Components/stack.py`) est une sous-classe de `Deck` à **une seule
+pile** (`draw`) : tout ce qui vaut pour un `deck` `single` vaut pour lui
+(immobile, cartes seulement, entrée face cachée au-dessus, `draw`, `shuffle`,
+`component_in_deck`, cartes gardées sur le serveur, `deck_json`). Les tests
+`isinstance(x, Deck)` de `session.py` et `resolve_deck_action` le couvrent ;
+`DECK_KINDS` liste les deux `kind` pour les lectures du `game_json` brut.
+
+```json
+{"kind": "stack", "id": "pack", "x": 100, "y": 100, "width": 300, "height": 450,
+ "back_src": "/cards/back.png", "text": "Pioche",
+ "components": [{"kind": "card", "id": "c01", "width": 243, "height": 385, "front_src": "/cards/c01.png"}]}
+```
+
+- `width`/`height` sont ceux de la **zone** de dépôt, pas d'une carte : une
+  carte y entre dès que son centre est dedans, et le client la dessine
+  **centrée** dans la zone, à sa propre taille (`piles.draw.top.width/height`).
+  Une carte qui ne déclare pas sa taille prend celle de la zone.
+- `type`, `discard`, `discard_x/y` sont sans effet : pas de défausse, `refill`
+  répond `unknown_pile`. Des cartes listées dans `discard` rejoignent la pile.
+- `deal` (`Session.deal_from_stack`) donne **une carte à chaque joueur**, du
+  dessus vers le dessous, dans l'ordre des sièges (`Session.dealt_players` :
+  `player_names`, puis les joueurs à la table sans siège connu). Les cartes
+  vont dans les **mains privées**, sans passer par la table, face visible
+  pour leur détenteur seul (`enter_hand`).
+  C'est tout ou rien : sans une carte par joueur, rien ne bouge.
+- Erreurs de `deal` : celles de `resolve_deck_action`, puis
+  `component_not_a_stack`, `private_hand_disabled`
+  (`options.private_hand` n'est pas un objet), `not_enough_cards`.
+- L'événement `deal` n'est **pas** envoyé par `Session.send` : chaque
+  destinataire reçoit son propre `cards` (la carte qu'il a reçue, avec sa
+  face ; liste vide pour un spectateur), passé par `for_user`. Les cartes des
+  autres ne partent pas, pas même leur `id`.
+- `deal` ne regarde pas la nationalité d'une carte.
 
 ## Joueurs simulés (`bots/`, `sherlock_bot.py`)
 

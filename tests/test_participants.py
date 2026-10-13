@@ -48,3 +48,60 @@ class TestParticipants:
         session = build_session(player_names=["alice"])
         assert session.return_status_json()["participants"] == [line("alice", "player", False)]
         assert session.return_session_json()["participants"] == [line("alice", "player", False)]
+
+
+class TestOrder:
+    """The players are listed in the order they joined, unless the owner changed it."""
+
+    @staticmethod
+    def names(session):
+        return [entry["nickname"] for entry in session.participants() if entry["role"] == "player"]
+
+    def test_the_players_are_listed_in_the_order_they_joined(self):
+        session = build_session(player_names=["bob"])
+        session.refresh_seats(False, ["alice", "bob", "carol"])
+        # bob was known first: a later list of seats does not move him
+        assert self.names(session) == ["bob", "alice", "carol"]
+
+    def test_the_owner_changes_the_order(self):
+        session = build_session(player_names=["alice", "bob", "carol"])
+        assert session.order_players(["carol", "alice", "bob"])
+        assert self.names(session) == ["carol", "alice", "bob"]
+        assert session.dealt_players() == ["carol", "alice", "bob"]
+
+    def test_the_players_left_out_keep_their_order_after_the_others(self):
+        session = build_session(player_names=["alice", "bob", "carol"])
+        assert session.order_players(["carol"])
+        assert self.names(session) == ["carol", "alice", "bob"]
+
+    def test_an_order_naming_a_stranger_or_a_player_twice_is_refused(self):
+        session = build_session(player_names=["alice", "bob"])
+        for nicknames in (["alice", "dave"], ["alice", "alice"], "alice", None, [1]):
+            assert not session.order_players(nicknames)
+        assert self.names(session) == ["alice", "bob"]
+
+    def test_the_order_survives_a_saved_session(self):
+        session = build_session(player_names=["alice", "bob", "carol"])
+        session.order_players(["bob", "carol", "alice"])
+        state = session.game_json_state()
+        assert state["player_order"] == ["bob", "carol", "alice"]
+        resumed = Session(
+            user=None, name="Vietnam", key="KEY1", code="CODE1", active=True,
+            variant="std", game_json=state, player_names=["alice", "bob", "carol"],
+        )
+        assert self.names(resumed) == ["bob", "carol", "alice"]
+
+    def test_only_the_owner_orders_the_players(self):
+        from handle_message import order_players
+        from tests.test_bag import LOGGER, FakeProtocol, error_codes
+        session = build_session(player_names=["alice", "bob"], owner_nickname="alice")
+        alice, bob = FakeUser("alice", session=session), FakeUser("bob", session=session)
+        session.players = [alice, bob]
+        refused = FakeProtocol(bob)
+        order_players(refused, LOGGER, {"nicknames": ["bob", "alice"]})
+        assert error_codes(refused) == ["not_session_owner"]
+        assert self.names(session) == ["alice", "bob"]
+        order_players(FakeProtocol(alice), LOGGER, {"nicknames": ["bob", "alice"]})
+        assert self.names(session) == ["bob", "alice"]
+        assert bob.sent[-1]["event"] == "session_status"
+        assert [entry["nickname"] for entry in bob.sent[-1]["participants"]] == ["bob", "alice"]

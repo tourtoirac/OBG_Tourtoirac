@@ -11,7 +11,8 @@ import pytest
 
 from bots.client import BotError, TableClient
 from bots.sherlock import DEAL, PACK, VILLAIN_DECK, VILLAINS, Game, Operator, Referee, legal
-from handle_message import acquire, draw, flip, refill, release, shuffle, take
+from handle_message import (
+    acquire, deal, draw, flip, refill, release, show_add, show_close, show_open, shuffle, take)
 from session import Session
 from tests.test_bag import LOGGER, FakeProtocol, FakeUser
 
@@ -32,25 +33,31 @@ def card(name, copies=1, **fields):
     return described
 
 
-def sherlock_game_json() -> dict:
-    """The table of the game, laid out as its game_json in Chabanas."""
+def sherlock_game_json(stack: bool = True) -> dict:
+    """
+    The table of the game, laid out as its game_json in Chabanas.
+    :param stack: False gives the game as it was first written, where "Donne"
+        was a plain deck and the players only had a private hand
+    """
     size = {"width": 240, "height": 383, "back_src": "/cards/back.png"}
     return {
         "game": {"max_players": 5, "max_watchers": 5},
-        "options": {"anonymous_id": True, "private_hand": True},
+        "options": {"anonymous_id": True,
+                    "private_hand": {"show_hands_to_other_players": True} if stack else {}},
         "fixed": [
             {"kind": "deck", "id": VILLAIN_DECK, "type": "single", "x": 300, "y": 300, **size,
-             "components": [card(name) for name in sorted(VILLAINS)]},
+             "shuffle_at_startup": True, "components": [card(name) for name in sorted(VILLAINS)]},
             {"kind": "deck", "id": PACK, "type": "duo", "x": 900, "y": 300, **size,
-             "discard_x": 1200, "discard_y": 300,
+             "discard_x": 1200, "discard_y": 300, "shuffle_at_startup": True,
              "components": [card(name, copies) for name, copies in PACK_CARDS.items()]},
-            {"kind": "deck", "id": DEAL, "type": "single", "x": 1860, "y": 300, **size, "components": []},
+            {"kind": "stack" if stack else "deck", "id": DEAL, "x": 1860, "y": 300, **size, "components": []},
         ],
         "movable": [card("game_afoot", x=300, y=900, side="back", **size)],
     }
 
 HANDLERS = {"acquire": acquire, "release": release, "take": take, "draw": draw,
-            "shuffle": shuffle, "refill": refill, "flip": flip}
+            "shuffle": shuffle, "refill": refill, "flip": flip, "deal": deal,
+            "show_open": show_open, "show_add": show_add, "show_close": show_close}
 
 
 class Seat(FakeUser):
@@ -71,8 +78,8 @@ class SeatProtocol(FakeProtocol):
 class Table:
     """A session of the game and the seats around it."""
 
-    def __init__(self, nicknames):
-        game_json = sherlock_game_json()
+    def __init__(self, nicknames, stack=True):
+        game_json = sherlock_game_json(stack)
         self.session = Session(
             user=None, name="SherlockHolmes", key="KEY1", code="CODE1", active=True,
             variant="std", game_json=game_json, started=True, player_names=list(nicknames),
@@ -96,7 +103,7 @@ class Table:
     def card_count(self) -> int:
         session = self.session
         in_decks = sum(
-            len(cards) for deck in session.components_lists["fixed"] if deck.kind == "deck"
+            len(cards) for deck in session.components_lists["fixed"] if deck.kind in ("deck", "stack")
             for cards in deck.piles.values())
         in_hands = sum(len(held) for held in session.hands.values())
         return in_decks + in_hands + len(session.components_lists["movable"])
@@ -225,7 +232,8 @@ class TestRound:
 
 class TestWithAHuman:
     def test_the_bots_wait_for_the_human_and_follow_its_turn(self):
-        table = Table(["holmes", "alice"])
+        # the game as it was first written: "Donne" is a plain deck
+        table = Table(["holmes", "alice"], stack=False)
         game = bots_game(table, ["holmes"])
         alice = table.clients["alice"]
 
@@ -281,3 +289,98 @@ class TestClient:
         with pytest.raises(BotError) as refusal:
             asyncio.run(table.clients["holmes"].draw(PACK, "discard"))
         assert refusal.value.code == "pile_empty"
+
+
+class TestNewFeatures:
+    """What the server learnt after the bots were first written."""
+
+    def test_a_stack_deals_to_the_humans_too(self):
+        table = Table(["holmes", "alice"])
+        game = bots_game(table, ["holmes"])
+        asyncio.run(asyncio.wait_for(game.setup(), 5))
+        assert len(table.clients["alice"].hand) == 6
+        assert len(table.clients["holmes"].hand) == 6
+        assert table.clients["holmes"].pile_count(DEAL) == 0
+        assert not [line for line in game.operator.lines if "piochez" in line]
+
+    def test_several_cards_are_drawn_at_once(self):
+        table = Table(["holmes", "watson"])
+        holmes = table.clients["holmes"]
+        cards = asyncio.run(holmes.draw_many(PACK, 5))
+        assert len(cards) == 5
+        assert all(card.on_table and card.held_by == "holmes" for card in cards)
+        assert holmes.pile_count(PACK) == 98
+
+    def test_cards_move_from_a_pile_to_another_by_tens(self):
+        table = Table(["holmes", "watson"])
+        holmes = table.clients["holmes"]
+        assert asyncio.run(holmes.draw_to_pile(PACK, "draw", DEAL, count=23)) == 23
+        assert holmes.pile_count(DEAL) == 23
+        # only the opening card is left lying on the table
+        assert len(holmes.loose_cards()) == 1
+
+    def test_a_bot_lays_its_hand_face_down(self):
+        table = Table(["holmes", "watson"])
+        game = bots_game(table, ["holmes", "watson"])
+
+        async def play():
+            await game.setup()
+            return await game.dump_hand(game.bots["holmes"])
+
+        assert asyncio.run(play()) == 6
+        laid = [card for card in table.session.components_lists["movable"] if card.id != "game_afoot"]
+        assert len(laid) == 6
+        assert all(card.side == "back" for card in laid)
+        # the other seat learnt nothing of them
+        watson = table.clients["watson"]
+        assert all(watson.cards[card.id].name is None for card in laid)
+
+    def test_a_bot_reads_the_hand_a_human_shows_it(self):
+        table = Table(["holmes", "alice"])
+        game = bots_game(table, ["holmes"], show_timeout=2)
+        alice = table.clients["alice"]
+
+        async def play():
+            await game.setup()
+            verdict = asyncio.ensure_future(game.is_guilty("holmes", "alice"))
+            await asyncio.sleep(0.05)
+            await alice.show_hand("holmes")
+            return await asyncio.wait_for(verdict, 5)
+
+        guilty = asyncio.run(play())
+        assert guilty == any(name in VILLAINS for name in alice.hand_names())
+        assert any("montre ta main à holmes" in line for line in game.operator.lines)
+
+    def test_a_hand_not_shown_in_time_is_asked_to_the_operator(self):
+        table = Table(["holmes", "alice"])
+        game = bots_game(table, ["holmes"], show_timeout=0.05)
+        game.operator.guilty = True
+
+        async def play():
+            await game.setup()
+            return await game.is_guilty("holmes", "alice")
+
+        assert asyncio.run(play()) is True
+
+    def test_a_bot_shows_its_hand_to_a_human_and_hides_it(self):
+        table = Table(["holmes", "alice", "bob"])
+        game = bots_game(table, ["holmes"])
+        holmes, alice, bob = (table.clients[name] for name in ("holmes", "alice", "bob"))
+
+        async def play():
+            await game.setup()
+            await game.show_hand(game.bots["holmes"], "alice")
+            seen = (alice.shown_names("holmes"), bob.shown_names("holmes"))
+            await holmes.hide_hand()
+            return seen
+
+        seen_by_alice, seen_by_bob = asyncio.run(play())
+        assert sorted(seen_by_alice) == sorted(holmes.hand_names())
+        assert seen_by_bob == []
+        assert alice.shown_names("holmes") == []
+
+    def test_the_first_game_json_still_plays(self):
+        table = Table(["holmes", "watson"], stack=False)
+        game = bots_game(table, ["holmes", "watson"])
+        asyncio.run(game.setup())
+        assert [len(c.hand) for c in table.clients.values()] == [6, 6]

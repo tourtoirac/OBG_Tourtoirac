@@ -7,6 +7,11 @@ Simulated players for Sherlock Holmes, the card game.
 The bots take a seat each, deal the round when the table is untouched, then
 play in their turn. With humans at the table, read what the program prints:
 it is the only voice the bots have. Type "aide" for the commands.
+
+When "Donne" is a stack, the bots deal with its Deal action: every player,
+humans included, gets its six cards in its private hand. When the game has
+the show_hands_to_other_players option, a hand that must be looked at is
+shown on screen instead of being told at the console.
 """
 import argparse
 import asyncio
@@ -29,7 +34,11 @@ HELP = """Commandes :
   setup              refait la mise en place (table intacte seulement)
   tour <pseudo>      dit à qui c'est de jouer
   pioche <pseudo> n  fait piocher n cartes (I Suspect, Inspector joués par un humain)
-  main <bot>         montre la main d'un bot (Clue, Disguise, Arrest, Holmes, Watson)
+  main <bot>         écrit ici la main d'un bot
+  montre <bot> <pseudo|tous>
+                     le bot montre sa main à l'écran, à un joueur ou à tous
+                     (Clue, Disguise, Arrest, Holmes, Watson joués par un humain)
+  cache <bot>        le bot referme la zone où il montrait sa main
   donne <bot>        le bot pose sa main face cachée sur la table et repioche autant
                      (Arrest d'un humain contre un bot innocent)
   quit               quitte"""
@@ -144,6 +153,23 @@ async def command(game: Game, console: Console, line: str) -> bool:
         game.referee.owe(" ".join(arguments[:-1]), int(arguments[-1]))
     elif name == "main" and target in game.bots:
         console.say(f"{target} : {', '.join(sorted(n or '?' for n in game.bots[target].client.hand_names()))}")
+    elif name == "montre" and len(arguments) >= 2:
+        # the nicknames may hold spaces: the bot is the longest one that fits
+        shown = False
+        for cut in range(len(arguments) - 1, 0, -1):
+            bot_name, to = " ".join(arguments[:cut]), " ".join(arguments[cut:])
+            to = "all" if to.lower() in ("tous", "all") else to
+            if bot_name in game.bots and (to == "all" or to in game.watcher.players) and to != bot_name:
+                if not game.watcher.can_show_hands():
+                    console.say("Ce jeu n'a pas l'option show_hands_to_other_players : utilisez « main <bot> »")
+                else:
+                    await game.show_hand(game.bots[bot_name], to)
+                shown = True
+                break
+        if not shown:
+            console.say("Usage : montre <bot> <pseudo|tous>")
+    elif name == "cache" and target in game.bots:
+        await game.bots[target].client.hide_hand()
     elif name == "donne" and target in game.bots:
         count = await game.dump_hand(game.bots[target])
         game.referee.owe(target, count)
@@ -187,8 +213,11 @@ async def main() -> None:
         clients.append(client)
 
     game = Game(clients, console, delay=arguments.delay, grace=arguments.grace)
-    if game.watcher.options.get("private_hand") is not True:
+    if game.watcher.private_hand() is None:
         console.say("Attention : ce jeu n'a pas l'option private_hand, les bots ne peuvent pas tenir de cartes")
+    elif not game.watcher.can_show_hands():
+        console.say("Ce jeu n'a pas l'option show_hands_to_other_players : "
+                    "les mains regardées passent par les questions de cette console")
 
     async def play() -> None:
         if not game.watcher.ready:

@@ -11,6 +11,10 @@ import os
 
 # seconds an action waits for the answer of the server
 ACTION_TIMEOUT = 10
+# the kinds of the components holding piles of cards
+DECK_KINDS = ("deck", "stack")
+# the most cards the server gives for one draw
+DRAW_MAX = 10
 
 
 class BotError(Exception):
@@ -84,6 +88,9 @@ class TableClient:
         self.hand_counts = {}
         # deck id -> description of the deck (its piles, without the cards)
         self.decks = {}
+        # what the players show this seat of their hand, by nickname of the
+        # owner: the "show" event of the server, as long as the area is open
+        self.shows = {}
         # called with every message, once the state has taken it in
         self.listeners = []
         self._waiters = []
@@ -121,7 +128,7 @@ class TableClient:
         self._read_status(session)
         components = session.get("components") or {}
         for item in components.get("fixed") or []:
-            if item.get("kind") == "deck":
+            if item.get("kind") in DECK_KINDS:
                 self.decks[item["id"]] = item
         for item in components.get("movable") or []:
             if item.get("kind") == "card":
@@ -132,6 +139,9 @@ class TableClient:
             card.on_table = False
             self.hand.append(card.id)
         self._read_hands(session.get("hands"))
+        self.shows = {}
+        for show in session.get("shows") or []:
+            self._on_show(show)
 
     def _on_session_status(self, message: dict) -> None:
         self._read_status(message)
@@ -213,6 +223,24 @@ class TableClient:
         if card is not None:
             card.update(message)
 
+    def _on_deal(self, message: dict) -> None:
+        self._read_deck(message.get("deck_json"))
+        self._read_hands(message.get("hands"))
+        # only the card dealt to this seat is described, with its front
+        for description in message.get("cards") or []:
+            card = self._card(description)
+            card.on_table = False
+            card.held_by = None
+            if card.id not in self.hand:
+                self.hand.append(card.id)
+
+    def _on_show(self, message: dict) -> None:
+        owner = message.get("owner")
+        if message.get("to") is None:
+            self.shows.pop(owner, None)
+        else:
+            self.shows[owner] = message
+
     def _on_shuffle(self, message: dict) -> None:
         self._read_deck(message.get("deck_json"))
 
@@ -244,6 +272,26 @@ class TableClient:
 
     def pile_top_name(self, deck_id: str, pile: str = "discard") -> str | None:
         return card_name((self.pile(deck_id, pile).get("top") or {}).get("src"))
+
+    def is_stack(self, deck_id: str) -> bool:
+        """Whether a deck is a stack, which deals its cards to the hands."""
+        return (self.decks.get(deck_id) or {}).get("kind") == "stack"
+
+    def private_hand(self) -> dict | None:
+        """The private_hand option of the game: an object when the hands exist."""
+        value = self.options.get("private_hand")
+        return value if isinstance(value, dict) else None
+
+    def can_show_hands(self) -> bool:
+        """Whether the game lets a player show cards of its hand to the others."""
+        return (self.private_hand() or {}).get("show_hands_to_other_players") is True
+
+    def shown_names(self, owner: str) -> list:
+        """
+        The cards a player shows this seat, named from the picture each one
+        shows: a card lying on its back gets the name of its back.
+        """
+        return [card_name(card.get("src")) for card in (self.shows.get(owner) or {}).get("cards") or []]
 
     def loose_cards(self) -> list:
         """The cards lying on the table that nobody holds."""
@@ -321,6 +369,61 @@ class TableClient:
         )
         return self.cards[answer["component_json"]["id"]]
 
+    async def draw_many(self, deck_id: str, count: int, pile: str = "draw") -> list:
+        """
+        Takes several cards from the top of a pile in one request, DRAW_MAX
+        at most: they all come out held by this seat. A pile too short gives
+        what it has.
+        :return: the cards, the top one of the pile first
+        """
+        request_id = f"{self.nickname}-{next(self._request_ids)}"
+        position = self.pile(deck_id, pile)
+        drawn = []
+
+        def last_card(message: dict) -> bool:
+            # the server sends one event for each card, and says in each how
+            # many came out
+            if message.get("event") != "draw" or message.get("request_id") != request_id:
+                return False
+            drawn.append(message["component_json"]["id"])
+            return message.get("index", 0) >= message.get("count", 1) - 1
+
+        await self._request(
+            {"action": "draw", "component_id": deck_id, "pile": pile, "request_id": request_id,
+             "count": min(count, DRAW_MAX), "x": position.get("x", 0), "y": position.get("y", 0)},
+            last_card,
+        )
+        return [self.cards[card_id] for card_id in drawn]
+
+    async def deal(self, deck_id: str) -> None:
+        """Asks a stack to give its top cards to the private hands, one each."""
+        await self._request(
+            {"action": "deal", "component_id": deck_id}, self._mine("deal", deck_id))
+
+    async def flip(self, card_id: str) -> None:
+        """Turns a card over. In the private hand, only this seat hears of it."""
+        await self._request(
+            {"action": "flip", "component_id": card_id},
+            lambda message: message.get("event") == "flip" and message.get("component_id") == card_id,
+        )
+
+    def _my_show(self, message: dict) -> bool:
+        return message.get("event") == "show" and message.get("owner") == self.nickname
+
+    async def show_hand(self, to: str = "all") -> None:
+        """
+        Shows the whole private hand, each card as it is, to another player
+        or to "all" of them.
+        """
+        await self._request({"action": "show_open", "to": to}, self._my_show)
+        for card_id in list(self.hand):
+            await self._request({"action": "show_add", "component_id": card_id}, self._my_show)
+
+    async def hide_hand(self) -> None:
+        """Stops showing the hand; nothing happens when it was not shown."""
+        if self.nickname in self.shows:
+            await self._request({"action": "show_close"}, self._my_show)
+
     async def take(self, card_id: str, x, y) -> Card:
         """Plays a card of the private hand: it comes out held by this seat."""
         request_id = f"{self.nickname}-{next(self._request_ids)}"
@@ -359,10 +462,22 @@ class TableClient:
     async def draw_to_hand(self, deck_id: str, pile: str = "draw") -> Card:
         return await self.keep(await self.draw(deck_id, pile))
 
-    async def draw_to_pile(self, deck_id: str, pile: str, to_deck: str, to_pile: str = "draw") -> None:
-        """Moves the top card of a pile onto another pile, unseen."""
-        card = await self.draw(deck_id, pile)
-        await self.release(card.id, *self._pile_corner(to_deck, to_pile, card))
+    async def draw_to_pile(self, deck_id: str, pile: str, to_deck: str, to_pile: str = "draw",
+                           count: int = 1) -> int:
+        """
+        Moves the top cards of a pile onto another pile, unseen, DRAW_MAX at
+        a time.
+        :return: how many cards were moved: fewer than count when the pile ran out
+        """
+        moved = 0
+        while moved < count:
+            cards = await self.draw_many(deck_id, count - moved, pile)
+            for card in cards:
+                await self.release(card.id, *self._pile_corner(to_deck, to_pile, card))
+            moved += len(cards)
+            if not cards:
+                break
+        return moved
 
     async def table_to_pile(self, card: Card, deck_id: str, pile: str = "draw") -> None:
         await self.acquire(card.id)
@@ -378,7 +493,14 @@ class TableClient:
         await self.take(card_id, x + card.width / 2, y + card.height / 2)
         await self.release(card_id, x, y)
 
-    async def hand_to_table(self, card_id: str, x, y) -> None:
+    async def hand_to_table(self, card_id: str, x, y, face_down: bool = False) -> None:
+        """
+        Lays a card of the hand on the table.
+        :param face_down: a card comes out of a hand on the side it has
+            there, face up unless its holder turned it over first
+        """
         card = self.cards[card_id]
+        if face_down and card.side == "front":
+            await self.flip(card_id)
         await self.take(card_id, x + card.width / 2, y + card.height / 2)
         await self.release(card_id, x, y)

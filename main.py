@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, draw, shuffle, refill, move, roll, roll_pool, rotate, flip, fix_positions, apply_setup, increment, decrement
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, show_open, show_add, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -109,6 +109,16 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 shuffle(self, self.factory.lobby.logger, message)
             case "refill": # a player puts the discard pile back into the draw pile
                 refill(self, self.factory.lobby.logger, message)
+            case "show_open": # a player shows cards of its hand to other players
+                show_open(self, self.factory.lobby.logger, message)
+            case "show_add": # a player shows one more card of its hand
+                show_add(self, self.factory.lobby.logger, message)
+            case "show_close": # a player stops showing cards of its hand
+                show_close(self, self.factory.lobby.logger, message)
+            case "order_players": # the owner changes the order the players are listed in
+                order_players(self, self.factory.lobby.logger, message)
+            case "deal": # a player deals the top cards of a stack to the private hands
+                deal(self, self.factory.lobby.logger, message)
             case "move": # change the x and y value of a component
                 move(self, self.factory.lobby.logger, message)
             case "roll": # players launch a dice and everyone sees the new face
