@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, show_open, show_add, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -109,10 +109,14 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 shuffle(self, self.factory.lobby.logger, message)
             case "refill": # a player puts the discard pile back into the draw pile
                 refill(self, self.factory.lobby.logger, message)
+            case "give": # a player gives a token of its hand to another player
+                give(self, self.factory.lobby.logger, message)
             case "show_open": # a player shows cards of its hand to other players
                 show_open(self, self.factory.lobby.logger, message)
             case "show_add": # a player shows one more card of its hand
                 show_add(self, self.factory.lobby.logger, message)
+            case "show_remove": # a player takes a shown card back into its hand
+                show_remove(self, self.factory.lobby.logger, message)
             case "show_close": # a player stops showing cards of its hand
                 show_close(self, self.factory.lobby.logger, message)
             case "order_players": # the owner changes the order the players are listed in

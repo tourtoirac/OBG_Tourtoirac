@@ -4,7 +4,7 @@ player knows what they are; the others know how many, and their backs.
 """
 import json
 
-from handle_message import acquire, flip, release, take
+from handle_message import acquire, flip, give, release, take
 from session import Session
 from tests.test_bag import FakeProtocol, FakeUser, call, error_codes, movable_ids
 
@@ -158,6 +158,56 @@ class TestPlaying:
         session.started = False
         call(take, protocol, "army", x=0, y=0)
         assert error_codes(protocol) == ["session_not_started"]
+
+
+class TestGiving:
+    def test_a_token_released_on_a_name_joins_that_hand(self):
+        session = build_session()
+        protocol, _, _, bob = two_players(session)
+        call(acquire, protocol, "army")
+        call(release, protocol, "army", x=0, y=0, hand=True, to_player="bob")
+        army = session.get_component("army")
+        assert session.hands == {"bob": [army]}
+        assert movable_ids(session) == ["scout"]
+        assert bob.sent[-1]["hand_of"] == "bob"
+
+    def test_a_release_for_nobody_at_the_table_is_refused(self):
+        session = build_session()
+        protocol, alice, _, _ = two_players(session)
+        call(acquire, protocol, "army")
+        call(release, protocol, "army", x=0, y=0, hand=True, to_player="zoe")
+        assert error_codes(protocol) == ["unknown_player"]
+        assert session.get_component("army").acquired_by is alice
+        assert session.hands == {}
+
+    def test_a_token_of_the_hand_is_given_without_crossing_the_table(self):
+        session = build_session()
+        protocol, _, _, bob = two_players(session)
+        keep(protocol, "army")
+        call(give, protocol, "army", to="bob")
+        army = session.get_component("army")
+        assert session.hands == {"bob": [army]}
+        assert movable_ids(session) == ["scout"]
+        event = bob.sent[-1]
+        assert (event["event"], event["nickname"], event["to"]) == ("give", "alice", "bob")
+        assert event["hands"] == session.hands_json()
+
+    def test_nobody_gives_from_the_hand_of_another(self):
+        session = build_session()
+        protocol, _, other, _ = two_players(session)
+        keep(protocol, "army")
+        call(give, other, "army", to="alice")
+        assert error_codes(other) == ["component_not_in_hand"]
+        assert list(session.hands) == ["alice"]
+
+    def test_a_token_is_given_to_another_player_only(self):
+        session = build_session()
+        protocol, _, _, _ = two_players(session)
+        keep(protocol, "army")
+        for receiver in ("alice", "zoe", None):
+            call(give, protocol, "army", to=receiver)
+        assert error_codes(protocol) == ["unknown_player"] * 3
+        assert list(session.hands) == ["alice"]
 
 
 class TestDescribing:

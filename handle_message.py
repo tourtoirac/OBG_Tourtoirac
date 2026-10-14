@@ -481,6 +481,18 @@ def release(self, logger, message):
         and component.kind in MOVABLE_KINDS
         and user.session.private_hand_enabled()
     )
+    # to_player: the token goes to the hand of another player, released on
+    # the name of that player. Asked for nobody at the table, it is refused
+    # and the token stays in the mouse hand.
+    receiver = user.name
+    if to_hand and message.get("to_player") not in (None, user.name):
+        receiver = message["to_player"]
+        if not user.session.receives_hand_of(user, receiver):
+            self.send_error(
+                "unknown_player",
+                "A token is given to another player of the game"
+            )
+            return
     if "x" in message and "y" in message and not to_hand:
         # a token released over a bag falls into it, whatever lies under the bag
         bag = user.session.bag_at(component, message["x"], message["y"])
@@ -496,8 +508,9 @@ def release(self, logger, message):
         deck, pile = None, None
         to_hand = False
     elif to_hand:
-        # the token leaves the table for the hand of the player
-        user.session.put_in_hand(user, component)
+        # the token leaves the table for the hand of the player, or of the
+        # player it was given to
+        user.session.put_in_hand(user, component, receiver)
     elif bag is not None:
         # the token joins the content of the bag: it leaves the table
         user.session.put_in_bag(bag, component)
@@ -523,7 +536,7 @@ def release(self, logger, message):
                 "deck_json": deck.return_json() if deck is not None else None,
                 # the nickname of the player whose private hand took the token,
                 # None when it did not go to a hand
-                "hand_of": user.name if to_hand else None,
+                "hand_of": receiver if to_hand else None,
                 # what everybody sees of the private hands after this release
                 "hands": user.session.hands_json(),
                 "user": user.id,
@@ -593,10 +606,72 @@ def take(self, logger, message):
         user.session.send_show(user.name)
 
 
+def give(self, logger, message):
+    """
+    Gives a token of the private hand of the player to another player: it
+    goes straight into that hand, without crossing the table. Only the
+    receiver reads the face of a card given.
+    """
+    logger.debug("Process give message")
+    user, component, ready = resolve_component_action(
+        self, message, "give", ["component_id"]
+    )
+    if not ready:
+        return
+
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return
+
+    if not user.session.private_hand_enabled():
+        self.send_error(
+            "private_hand_disabled",
+            "This game has no private hand"
+        )
+        return
+
+    receiver = message.get("to")
+    if not user.session.receives_hand_of(user, receiver):
+        self.send_error(
+            "unknown_player",
+            "A token is given to another player of the game"
+        )
+        return
+
+    component_id = message["component_id"]
+    was_shown = user.session.shown_by(component) == user.name
+    if not user.session.give_from_hand(user, component, receiver):
+        self.send_error(
+            "component_not_in_hand",
+            f"Component {component_id} is not in the hand of this player"
+        )
+        return
+
+    # sent to everyone: the counts of both hands change. for_user leaves the
+    # face of a card to its new holder alone
+    user.session.send({
+        "event": "give",
+        "nickname": user.name,
+        "to": receiver,
+        "component_id": component_id,
+        "user": user.id,
+        "hands": user.session.hands_json(),
+        "component_json": component.return_json(),
+    })
+    # the card was shown from the hand: it leaves that area too
+    if was_shown:
+        user.session.send_show(user.name)
+
+
 def resolve_show_action(self, action):
     """
     Shared preamble of the actions on the area a player shows cards of its
-    hand in (show_open, show_add, show_close).
+    hand in (show_open, show_add, show_remove, show_close).
     Returns the user when the action can proceed, or None when an error has
     already been sent to the client.
     """
@@ -676,6 +751,29 @@ def show_add(self, logger, message):
         self.send_error(
             "component_not_in_hand",
             f"Component {component_id} is not in the hand of this player"
+        )
+        return
+
+    session.send_show(user.name)
+
+
+def show_remove(self, logger, message):
+    """
+    Takes a card back from the area of the player into its hand, where it
+    stays hidden again. The other cards of the area keep their rank.
+    """
+    logger.debug("Process show_remove message")
+    user = resolve_show_action(self, "show_remove")
+    if user is None:
+        return
+
+    session = user.session
+    component_id = message.get("component_id")
+    component = session.get_component(component_id)
+    if not component or not session.remove_from_show(user.name, component):
+        self.send_error(
+            "component_not_shown",
+            f"Component {component_id} is not shown by this player"
         )
         return
 

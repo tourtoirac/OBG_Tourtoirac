@@ -110,12 +110,13 @@ leur attache un errback de journalisation.
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
 | `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`) | session |
+| `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
 | `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` | session |
 | `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
 | `shuffle` `{component_id, pile?}` | `shuffle` `{component_id, pile, user, nickname, deck_json}` | session |
 | `refill` `{component_id}` | `refill` `{component_id, user, nickname, deck_json}` | session |
 | `deal` `{component_id}` | `deal` `{component_id, user, nickname, deck_json, hands, cards}` ; `cards` diffère selon le destinataire | session |
-| `show_open` `{to}`, `show_add` `{component_id}`, `show_close` | `show` `{owner, to, cards, component_ids}` ; contenu différent selon le destinataire | joueurs seulement |
+| `show_open` `{to}`, `show_add` `{component_id}`, `show_remove` `{component_id}`, `show_close` | `show` `{owner, to, cards, ranks, component_ids}` ; contenu différent selon le destinataire | joueurs seulement |
 | ↳ `acquire` refusé | `error` `session_not_started` / `players_missing` | appelant |
 | `move` | `move` `{component_id, coordinates}` | session |
 | `roll` | `roll` `{src, cooldown_seconds}` | session |
@@ -548,7 +549,18 @@ Chaque joueur garde hors de la table des pions que lui seul connaît.
 - Dépôt : `release` avec `"hand": true` (`Session.put_in_hand`). Le pion doit
   être tenu par l'appelant ; il quitte `movable` et perd sa position
   (`leave_table`), comme dans un sac. Seuls un `token` et une `card` y entrent. L'événement
-  `release` porte `hand_of` (pseudo, `None` sinon) et `hands`.
+  `release` porte `hand_of` (pseudo, `None` sinon) et `hands`. Avec
+  `to_player` (pseudo), le pion va dans la main de **ce** joueur
+  (`hand_of` le nomme) : n'importe quel siège sauf l'appelant
+  (`receives_hand_of`, sur `dealt_players`), sinon `unknown_player` et rien
+  ne bouge, le pion reste tenu.
+- Don d'une main à l'autre : action `give` `{component_id, to}`
+  (`Session.give_from_hand`), sans passer par la table. Mêmes conditions que
+  `take` (`acquire_refusal`, `private_hand_disabled`) ; `to` suit
+  `receives_hand_of` (`unknown_player`), le pion doit être dans la main de
+  l'appelant (`component_not_in_hand`). Une carte montrée quitte la zone
+  (`show` renvoyé). Événement `give` à toute la session : `for_user` ne laisse
+  la face d'une carte qu'au receveur.
 - Reprise : action `take` `{component_id, x, y, request_id}`
   (`Session.take_from_hand`), mêmes conditions qu'`acquire`
   (`acquire_refusal`). Le pion revient en fin de `movable`, centré sur
@@ -558,8 +570,8 @@ Chaque joueur garde hors de la table des pions que lui seul connaît.
   (`component_in_hand`, dans `refuse_modification`). **Exception** : le
   détenteur retourne ce qu'il garde dans **sa** main (`flip`, traité avant
   `refuse_modification`). L'événement `flip` n'est alors envoyé qu'à lui.
-- `Session.enter_hand` est le seul point d'entrée dans une main (`release`
-  et `deal`) : une **carte** y passe face visible (`side` `front`) ; un pion
+- `Session.enter_hand` est le seul point d'entrée dans une main (`release`,
+  `give` et `deal`) : une **carte** y passe face visible (`side` `front`) ; un pion
   garde sa face. Le pion ou la carte est rejoué sur la face qu'il a en main.
 - Ce que tout le monde lit : `hands_json()` → `{pseudo: [{src, width,
   height}]}`, le **dos** de chaque pion, sans `id` ni face. `src` vaut `None`
@@ -576,7 +588,11 @@ Chaque joueur garde hors de la table des pions que lui seul connaît.
 Actif seulement si `options.private_hand.show_hands_to_other_players` vaut
 `true` (`Session.show_hands_enabled`) ; sinon `show_hands_disabled`.
 
-- `Session.shows` : `{pseudo: {"to": "all" | pseudo, "cards": [composants]}}`.
+- `Session.shows` : `{pseudo: {"to": "all" | pseudo, "cards": [composants],
+  "ranks": [rangs], "next_rank": n}}`. Chaque carte reçoit son rang (1, 2, …)
+  quand elle est montrée (`add_to_show`) : il ne change plus, et n'est jamais
+  redonné, même si la carte sort de la zone et y revient. Seule la fermeture
+  de la zone remet les rangs à 1.
   Les cartes montrées **restent dans `hands`** : elles sont seulement lues par
   plus de monde. Fermer la zone (`close_show`) suffit donc à les « rendre ».
 - `shows` n'est **jamais sauvegardé** : à la reprise, toutes les cartes sont
@@ -584,9 +600,12 @@ Actif seulement si `options.private_hand.show_hands_to_other_players` vaut
 - `show_open` `{to}` : `"all"` ou le pseudo d'un autre joueur
   (`dealt_players`), sinon `unknown_player`. Redemandé, il change le
   destinataire en gardant les cartes. `show_add` : `show_not_open`,
-  `component_not_in_hand`. `show_close` sans zone ouverte ne dit rien.
+  `component_not_in_hand`. `show_remove` (`remove_from_show`) remet une
+  carte montrée dans la main seule, les autres gardent leur rang ; sinon
+  `component_not_shown`. `show_close` sans zone ouverte ne dit rien.
 - `show_json(pseudo, user)` : chaque carte **telle quelle**, sur la face que
-  son détenteur lui a laissée (`{src, width, height}`, sans id) ; seul le
+  son détenteur lui a laissée (`{src, width, height}`, sans id), et `ranks`
+  dans le même ordre ; seul le
   détenteur reçoit `component_ids`. Qui ne lit pas la zone reçoit
   `to: null` et aucune carte (`reads_show_of` : le détenteur, le
   destinataire, ou tous les joueurs ; jamais un spectateur).
@@ -594,7 +613,8 @@ Actif seulement si `options.private_hand.show_hands_to_other_players` vaut
   `for_user` (les faces sont faites pour être lues) ; les spectateurs ne
   reçoivent rien.
 - Retourner une carte montrée (`flip` en main) et la jouer (`take`)
-  renvoient un `show` ; `take_from_hand` la retire de la zone.
+  renvoient un `show` ; `take_from_hand` la retire de la zone
+  (`remove_from_show`).
 - `return_session_json(user)["shows"]` : les zones que `user` lit, la sienne
   d'abord.
 - Tests : `tests/test_show_hands.py`.

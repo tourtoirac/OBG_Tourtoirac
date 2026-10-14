@@ -428,7 +428,10 @@ class Session:
         # there when the player comes back.
         self.hands = {}
         # what the players show of their hand, by nickname of the owner:
-        # {"to": "all" or a nickname, "cards": [components of that hand]}.
+        # {"to": "all" or a nickname, "cards": [components of that hand],
+        #  "ranks": [rank of each card], "next_rank": rank of the next one}.
+        # A rank is given once: it never changes, nor is it given again,
+        # until the area is closed.
         # Never saved: a resumed session finds every card back in its hand.
         self.shows = {}
         self.load_session_components()
@@ -862,7 +865,7 @@ class Session:
         """
         if to != "all" and (to == nickname or to not in self.dealt_players()):
             return False
-        self.shows.setdefault(nickname, {"cards": []})["to"] = to
+        self.shows.setdefault(nickname, {"cards": [], "ranks": [], "next_rank": 1})["to"] = to
         return True
 
     def add_to_show(self, nickname: str, component) -> bool:
@@ -876,7 +879,26 @@ class Session:
             return False
         if not any(component is card for card in show["cards"]):
             show["cards"].append(component)
+            # the ranks only grow: a card shown again gets a new one
+            show["ranks"].append(show["next_rank"])
+            show["next_rank"] += 1
         return True
+
+    def remove_from_show(self, nickname: str, component) -> bool:
+        """
+        Stops showing a component: it stays in the hand of the player. The
+        other cards keep their rank.
+        :return: False when the player does not show that component
+        """
+        show = self.shows.get(nickname)
+        if show is None:
+            return False
+        for index, card in enumerate(show["cards"]):
+            if card is component:
+                del show["cards"][index]
+                del show["ranks"][index]
+                return True
+        return False
 
     def close_show(self, nickname: str) -> bool:
         """
@@ -909,11 +931,15 @@ class Session:
         What user reads of the cards a player shows: each one as it is, on
         the side its owner left it. Whoever may not read them is told the
         area is closed.
-        :return: {"event": "show", "owner", "to", "cards", "component_ids"};
-            "to" is None when nothing is shown to user, and only the owner
-            gets the ids of its cards
+        :return: {"event": "show", "owner", "to", "cards", "ranks",
+            "component_ids"}; "to" is None when nothing is shown to user,
+            "ranks" gives the rank of each card, and only the owner gets the
+            ids of its cards
         """
-        closed = {"event": "show", "owner": nickname, "to": None, "cards": [], "component_ids": []}
+        closed = {
+            "event": "show", "owner": nickname, "to": None,
+            "cards": [], "ranks": [], "component_ids": [],
+        }
         if not self.reads_show_of(user, nickname):
             return closed
         show = self.shows[nickname]
@@ -924,6 +950,7 @@ class Session:
                 {"src": card.image_src[card.side], "width": card.width, "height": card.height}
                 for card in show["cards"]
             ],
+            ranks=list(show["ranks"]),
             component_ids=[card.id for card in show["cards"]] if user.name == nickname else [],
         )
 
@@ -956,16 +983,45 @@ class Session:
                 return nickname
         return None
 
-    def put_in_hand(self, user: User, component) -> None:
+    def put_in_hand(self, user: User, component, nickname: str | None = None) -> None:
         """
-        Moves a token from the table into the private hand of user: it leaves
-        "movable" and loses its position until that player plays it again.
+        Moves a token from the table into a private hand: it leaves "movable"
+        and loses its position until its holder plays it again.
+        :param nickname: the player whose hand takes it, user by default
         """
         movable = self.components_lists['movable']
         if component in movable:
             movable.remove(component)
         component.leave_table()
-        self.enter_hand(user.name, component)
+        self.enter_hand(nickname or user.name, component)
+
+    def receives_hand_of(self, user: User, nickname) -> bool:
+        """
+        Whether user may put a token in the private hand of another player:
+        any seat of the game but its own.
+        """
+        return (
+            isinstance(nickname, str)
+            and nickname != user.name
+            and nickname in self.dealt_players()
+        )
+
+    def give_from_hand(self, user: User, component, nickname: str) -> bool:
+        """
+        Moves a token of the private hand of user into the hand of another
+        player, without going through the table. A card shown from the hand
+        of user leaves that area.
+        :return: False when the token is not in the hand of user
+        """
+        held = self.hands.get(user.name, [])
+        if not any(component is item for item in held):
+            return False
+        held.remove(component)
+        if not held:
+            del self.hands[user.name]
+        self.remove_from_show(user.name, component)
+        self.enter_hand(nickname, component)
+        return True
 
     def enter_hand(self, nickname: str, component) -> None:
         """
@@ -993,9 +1049,7 @@ class Session:
         if not held:
             del self.hands[user.name]
         # a card played is no longer shown from the hand
-        show = self.shows.get(user.name)
-        if show is not None:
-            show["cards"] = [card for card in show["cards"] if card is not component]
+        self.remove_from_show(user.name, component)
         if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
             x = component.width / 2
             y = component.height / 2

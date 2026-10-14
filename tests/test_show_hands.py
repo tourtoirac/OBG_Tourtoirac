@@ -5,7 +5,7 @@ the cards never leave the hand.
 """
 import json
 
-from handle_message import flip, show_add, show_close, show_open, take
+from handle_message import flip, give, show_add, show_close, show_open, show_remove, take
 from session import Session
 from tests.test_bag import LOGGER, FakeProtocol, FakeUser, call, error_codes
 from tests.test_private_hand import ARMY, SCOUT, keep
@@ -97,7 +97,7 @@ class TestShowing:
         ask(show_add, alice, component_id="army")
         assert shown(a)["cards"] == shown(b)["cards"] == [ARMY_FRONT]
         assert shown(c) == {"event": "show", "owner": "alice", "to": None,
-                            "cards": [], "component_ids": []}
+                            "cards": [], "ranks": [], "component_ids": []}
 
     def test_the_card_is_shown_as_it_is_and_turns_with_the_hand(self):
         session = build_session()
@@ -199,6 +199,85 @@ class TestClosing:
         call(take, alice, "army", x=100, y=100)
         assert session.shows["alice"]["cards"] == []
         assert shown(b)["cards"] == []
+
+
+    def test_a_card_given_leaves_the_area(self):
+        session = build_session()
+        (alice, _, _), (_, b, _), _ = table(session)
+        ask(show_open, alice, to="all")
+        ask(show_add, alice, component_id="army")
+        call(give, alice, "army", to="bob")
+        assert session.shows["alice"]["cards"] == []
+        assert shown(b)["cards"] == []
+
+
+class TestRanks:
+    def showing_both(self, session):
+        """alice shows the army, then the scout, to everyone."""
+        (alice, _, _), users, dave = table(session)
+        keep(alice, "scout")
+        ask(show_open, alice, to="all")
+        ask(show_add, alice, component_id="army")
+        ask(show_add, alice, component_id="scout")
+        return alice, users, dave
+
+    def test_cards_are_ranked_in_the_order_they_are_shown(self):
+        session = build_session()
+        _, (a, b, _), _ = self.showing_both(session)
+        assert shown(a)["ranks"] == shown(b)["ranks"] == [1, 2]
+
+    def test_a_card_leaving_the_area_keeps_the_others_ranks(self):
+        session = build_session()
+        alice, (_, b, _), _ = self.showing_both(session)
+        call(take, alice, "army", x=100, y=100)
+        assert shown(b)["ranks"] == [2]
+
+    def test_a_rank_is_never_given_twice(self):
+        session = build_session()
+        alice, (a, _, _), _ = self.showing_both(session)
+        ask(show_remove, alice, component_id="army")
+        ask(show_add, alice, component_id="army")
+        assert shown(a)["component_ids"] == ["scout", "army"]
+        assert shown(a)["ranks"] == [2, 3]
+
+    def test_closing_the_area_starts_the_ranks_again(self):
+        session = build_session()
+        alice, (a, _, _), _ = self.showing_both(session)
+        ask(show_close, alice)
+        ask(show_open, alice, to="all")
+        ask(show_add, alice, component_id="scout")
+        assert shown(a)["ranks"] == [1]
+
+    def test_the_closed_area_has_no_rank(self):
+        session = build_session()
+        _, _, dave = self.showing_both(session)
+        assert session.show_json("alice", dave)["ranks"] == []
+
+
+class TestRemoving:
+    def test_a_card_taken_back_stays_in_the_hand(self):
+        session = build_session()
+        (alice, _, _), (_, b, _), _ = table(session)
+        ask(show_open, alice, to="all")
+        ask(show_add, alice, component_id="army")
+        ask(show_remove, alice, component_id="army")
+        army = session.get_component("army")
+        assert session.hands == {"alice": [army]}
+        assert session.shows["alice"]["cards"] == []
+        assert shown(b)["cards"] == []
+
+    def test_a_card_not_shown_is_refused(self):
+        session = build_session()
+        (alice, _, _), _, _ = table(session)
+        ask(show_open, alice, to="all")
+        ask(show_remove, alice, component_id="army")
+        assert error_codes(alice) == ["component_not_shown"]
+
+    def test_nothing_is_removed_without_an_area(self):
+        session = build_session()
+        (alice, _, _), _, _ = table(session)
+        ask(show_remove, alice, component_id="army")
+        assert error_codes(alice) == ["component_not_shown"]
 
 
 class TestDescribing:
