@@ -82,6 +82,20 @@ class TestTokens:
         session = build_session({"movable": [dict(TOKEN, nationality=3)]})
         assert session.get_component("army").nationality is None
 
+    def test_a_token_carries_block_sight_to_the_clients(self):
+        session = build_session({"movable": [dict(TOKEN, nationality="US", block_sight=True)]})
+        assert session.get_component("army").return_json()["block_sight"] is True
+
+    def test_block_sight_is_off_unless_set_to_true(self):
+        session = build_session({"movable": [TOKEN, dict(TOKEN, id="other", block_sight="true")]})
+        assert session.get_component("army").block_sight is False
+        assert session.get_component("other").block_sight is False
+
+    def test_block_sight_survives_a_save(self):
+        session = build_session({"movable": [dict(TOKEN, block_sight=True)]})
+        state = json.loads(json.dumps(session.game_json_state()))
+        assert build_session(state).get_component("army").block_sight is True
+
 
 class TestSeats:
     def test_the_creator_gets_the_nationality_chabanas_stored(self, sync, session_info):

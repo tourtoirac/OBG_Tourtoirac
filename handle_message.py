@@ -1,8 +1,11 @@
+import json
+
 from twisted.internet import defer
 
 from Components.deck import Deck
 from Components.token import ROTATION_STEP
 from session import MOVABLE_KINDS
+from voice import MAX_SIGNAL_SIZE, ice_servers
 
 # Un cran de rotation vaut ROTATION_STEP degres. Le client clique une zone et
 # dit de quel bord il tourne ; il ne peut pas choisir l'angle.
@@ -668,6 +671,109 @@ def give(self, logger, message):
         user.session.send_show(user.name)
 
 
+def resolve_voice_action(self, action):
+    """
+    Shared preamble of the voice actions (voice_join, voice_leave,
+    voice_signal): only a player of a session talks.
+    Returns the user when the action can proceed, or None when an error has
+    already been sent to the client.
+    """
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error(
+            "unknown_user",
+            "No user is bound to this connection"
+        )
+        return None
+
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            f"The {action} action requires an active session"
+        )
+        return None
+
+    if user.role != "player":
+        self.send_error(
+            "watcher_not_allowed",
+            "Only players can talk"
+        )
+        return None
+
+    return user
+
+
+def voice_join(self, logger, _):
+    """
+    Puts the player in the voice channel of its session. It is told who is
+    already there, with the ICE servers to reach them: its browser calls each
+    of them. Everybody is told the new list of members.
+    """
+    logger.debug("Process voice_join message")
+    user = resolve_voice_action(self, "voice_join")
+    if user is None:
+        return
+
+    peers = user.session.join_voice(user)
+    user.send({
+        "event": "voice_joined",
+        "peers": peers,
+        "ice_servers": ice_servers(user.name),
+    })
+    user.session.send_voice_members()
+
+
+def voice_leave(self, logger, _):
+    """
+    Takes the player out of the voice channel: the others hang up on it.
+    """
+    logger.debug("Process voice_leave message")
+    user = resolve_voice_action(self, "voice_leave")
+    if user is None:
+        return
+
+    if user.session.leave_voice(user):
+        user.session.send_voice_members()
+
+
+def voice_signal(self, logger, message):
+    """
+    Relays a WebRTC message (offer, answer or ICE candidate) to another player
+    of the voice channel. Its content is the browsers' business: the server
+    only checks who sends it to whom.
+    """
+    logger.debug("Process voice_signal message")
+    user = resolve_voice_action(self, "voice_signal")
+    if user is None:
+        return
+
+    session = user.session
+    if user not in session.voice:
+        self.send_error(
+            "voice_not_joined",
+            "This player is not in the voice channel"
+        )
+        return
+
+    data = message.get("data")
+    if not isinstance(data, dict) or len(json.dumps(data)) > MAX_SIGNAL_SIZE:
+        self.send_error(
+            "invalid_voice_signal",
+            "A voice signal is an object of reasonable size"
+        )
+        return
+
+    target = session.voice_member(message.get("to"))
+    if target is None or target is user:
+        self.send_error(
+            "unknown_player",
+            "A voice signal goes to another player of the voice channel"
+        )
+        return
+
+    target.send({"event": "voice_signal", "from": user.name, "data": data})
+
+
 def resolve_show_action(self, action):
     """
     Shared preamble of the actions on the area a player shows cards of its
@@ -783,15 +889,26 @@ def show_remove(self, logger, message):
 def show_close(self, logger, _):
     """
     Closes the area of the player: the cards it showed are only in its hand
-    again.
+    again, back on their front.
     """
     logger.debug("Process show_close message")
     user = resolve_show_action(self, "show_close")
     if user is None:
         return
 
-    if user.session.close_show(user.name):
-        user.session.send_show(user.name)
+    turned = user.session.close_show(user.name)
+    if turned is None:
+        return
+    user.session.send_show(user.name)
+    # only the holder sees its hand, so only that player is told of the turn
+    for component in turned:
+        user.send(user.session.for_user({
+            "event": "flip",
+            "component_id": component.id,
+            "side": component.side,
+            "front_src": component.image_src["front"],
+            "back_src": component.image_src["back"],
+        }, user))
 
 
 def pick(self, logger, message):

@@ -184,6 +184,30 @@ class TestClosing:
             assert shown(user)["to"] is None
             assert shown(user)["cards"] == []
 
+    def test_closing_turns_the_cards_back_on_their_front(self):
+        session = build_session()
+        (alice, _, _), (a, b, _), _ = table(session)
+        ask(show_open, alice, to="bob")
+        ask(show_add, alice, component_id="army")
+        call(flip, alice, "army")
+        a.sent.clear()
+        b.sent.clear()
+        ask(show_close, alice)
+        army = session.get_component("army")
+        assert army.side == "front"
+        flips = [message for message in a.sent if message["event"] == "flip"]
+        assert [(m["component_id"], m["side"]) for m in flips] == [("army", "front")]
+        assert not any(message["event"] == "flip" for message in b.sent)
+
+    def test_closing_leaves_a_front_card_untouched(self):
+        session = build_session()
+        (alice, _, _), (a, _, _), _ = table(session)
+        ask(show_open, alice, to="all")
+        ask(show_add, alice, component_id="army")
+        a.sent.clear()
+        ask(show_close, alice)
+        assert not any(message["event"] == "flip" for message in a.sent)
+
     def test_closing_what_is_not_open_tells_nobody(self):
         session = build_session()
         (alice, _, _), users, _ = table(session)

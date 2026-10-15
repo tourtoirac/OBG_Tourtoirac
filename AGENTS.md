@@ -110,6 +110,9 @@ leur attache un errback de journalisation.
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
 | `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`) | session |
+| `voice_join` | `voice_joined` `{peers, ice_servers}` à l'appelant, puis `voice_members` `{members}` | appelant, puis session |
+| `voice_leave` | `voice_members` `{members}` | session |
+| `voice_signal` `{to, data}` | `voice_signal` `{from, data}` | le seul destinataire |
 | `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
 | `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` | session |
 | `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
@@ -213,7 +216,8 @@ Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `pick`, `move`,
 `draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
-`decrement`.
+`decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
+`order_players`, `voice_join`, `voice_leave`, `voice_signal`.
 
 ## Configuration
 
@@ -229,7 +233,8 @@ configuration réelle est en dur dans le code :
 | URL de Chabanas | `chabanas.py`, `Chabanas.__init__` | `http://obg-chabanas:80` |
 | Délai HTTP | `chabanas.py`, `Chabanas.__init__` | `10.0` s |
 
-Aucune variable d'environnement n'est lue. La liste des jeux affichés vient
+Seules les variables du salon audio sont lues (`voice.py`, voir § Salon
+audio) : `OBG_STUN_URLS`, `OBG_TURN_URLS`, `OBG_TURN_SECRET`, `OBG_TURN_TTL`. La liste des jeux affichés vient
 de Chabanas (jeux `active`) : `list_game` et `list_sessions` n'attendent aucun
 `game_name_list`, et Tourtoirac n'en envoie pas à `/game/list` ni à
 `/session/list`.
@@ -261,7 +266,11 @@ par là plutôt que par une logique de face séparée.
 
 Notion **facultative** : un `game_json` peut déclarer, **dans ses `options`**,
 `"nationalities": ["US", "NVA"]` (la clé n'est pas lue à la racine), et un `token` peut porter
-`"nationality": "US"`.
+`"nationality": "US"`. Un `token` peut aussi porter `"block_sight": true`
+(seul le booléen `true` compte) : `Token.block_sight` est transmis tel quel au
+client par `return_json`, qui s'en sert pour masquer, dans l'aperçu de pile,
+les pions situés dessous aux autres nationalités et aux spectateurs. Le serveur
+n'applique aucune règle dessus.
 
 **Seule règle pour l'instant** : un pion qui porte une nationalité n'est touché
 que par un joueur de cette nationalité (`Component.acquirable_by`, redéfini par
@@ -534,6 +543,40 @@ directement dans la main du joueur.
   en cours de partie. Seuls les `token` y entrent (`copies` y est honoré) ;
   tout autre `kind` est ignoré, comme un sac déclaré ailleurs que dans `fixed`.
 - `duplicate_component_ids` compte l'`id` du sac et ceux de ses pions.
+
+## Salon audio (`voice`)
+
+Les joueurs d'une session se parlent par **WebRTC**, de navigateur à
+navigateur (maillage complet : une connexion par paire). **Le son ne passe
+jamais par Tourtoirac** : il ne fait que relayer les messages de mise en
+relation et dire qui est dans le salon. Aucune option de jeu : le salon existe
+dans toute partie ; les spectateurs n'y entrent pas (`watcher_not_allowed`).
+
+- `Session.voice` : `[User]`, une entrée par connexion, dans l'ordre
+  d'arrivée. **Jamais sauvegardé.** `voice_members()` en donne les pseudos,
+  repris par `return_session_json` (`voice`).
+- `voice_join` (`join_voice`) : l'appelant reçoit `voice_joined` avec
+  `peers` (ceux déjà là) et `ice_servers` ; **c'est le nouveau venu qui
+  appelle chacun d'eux**, les autres attendent son offre. Les actions étant
+  traitées une à une, deux joueurs ne s'appellent jamais mutuellement. Une
+  ancienne connexion du même pseudo est retirée du salon.
+- `voice_leave` (`leave_voice`) et `Session.remove_user` (départ, coupure,
+  connexion remplacée) retirent du salon et diffusent `voice_members`.
+- `voice_signal` `{to, data}` : `data` est opaque (offre, réponse ou
+  candidat ICE), un objet de 64 Kio au plus (`invalid_voice_signal`). Envoyé
+  par `user.send` au seul destinataire, sans `Session.send`. Erreurs :
+  `voice_not_joined` (l'appelant n'est pas dans le salon), `unknown_player`
+  (destinataire absent du salon, ou soi-même).
+- Serveurs ICE (`voice.ice_servers`) : `OBG_STUN_URLS` (par défaut
+  `stun:stun.l.google.com:19302`, vide pour aucun) ; un serveur TURN seulement
+  si `OBG_TURN_URLS` **et** `OBG_TURN_SECRET` sont posés. Le mot de passe TURN
+  est éphémère (`turn_credentials`, schéma `use-auth-secret` de coturn :
+  `"<expiration>:<pseudo>"` et HMAC-SHA1 en base64, `OBG_TURN_TTL` secondes,
+  un jour par défaut). Sans TURN, l'audio échoue entre certains réseaux
+  (NAT symétrique, réseaux d'entreprise, 4G). En production, le relais est
+  le service `obg-coturn` : configuration et mise en service dans
+  `OBG/deploy/coturn/README.md`.
+- Tests : `tests/test_voice.py`.
 
 ## Main privée (`hands`)
 

@@ -434,6 +434,9 @@ class Session:
         # until the area is closed.
         # Never saved: a resumed session finds every card back in its hand.
         self.shows = {}
+        # the players in the voice channel of the session, in the order they
+        # joined it: one entry per connection. Never saved.
+        self.voice = []
         self.load_session_components()
         self.load_hands(game_json.get('hands'))
         # does a token of this game belong to a nationality, or is it a card ?
@@ -563,7 +566,9 @@ class Session:
             component.get('origin_x'),
             component.get('origin_y'),
             # nationality: the side this token belongs to, when the game says so
-            component.get('nationality')
+            component.get('nationality'),
+            # block_sight: hides the tokens under it from the other nationalities
+            component.get('block_sight', False)
         )
 
     @staticmethod
@@ -900,12 +905,21 @@ class Session:
                 return True
         return False
 
-    def close_show(self, nickname: str) -> bool:
+    def close_show(self, nickname: str) -> list | None:
         """
-        Closes the area of a player: its cards are only in the hand again.
-        :return: False when that player was showing nothing
+        Closes the area of a player: its cards are only in the hand again,
+        each one turned back on its front.
+        :return: the cards that had to be turned over, or None when that
+            player was showing nothing
         """
-        return self.shows.pop(nickname, None) is not None
+        show = self.shows.pop(nickname, None)
+        if show is None:
+            return None
+        turned = []
+        for card in show["cards"]:
+            if card.side != 'front' and card.set_side('front'):
+                turned.append(card)
+        return turned
 
     def shown_by(self, component) -> str | None:
         """
@@ -1472,6 +1486,8 @@ class Session:
         # hands: what everybody sees of the private hands; hand: the one of the
         # reader, with its faces
         session_json["hands"] = self.hands_json()
+        # who is in the voice channel
+        session_json["voice"] = self.voice_members()
         session_json["hand"] = self.hand_json(user)
         # shows: the cards the players show of their hand, as far as the
         # reader may read them
@@ -1659,12 +1675,57 @@ class Session:
 
     def remove_user(self, user):
         """
-        Removes a user from the session.
+        Removes a user from the session. A player leaving leaves the voice
+        channel too: the others are told.
         """
         if user in self.players:
             self.players.remove(user)
         elif user in self.watchers:
             self.watchers.remove(user)
+        if self.leave_voice(user):
+            self.send_voice_members()
+
+    def voice_members(self) -> list:
+        """
+        The nicknames of the players in the voice channel.
+        """
+        return [user.name for user in self.voice]
+
+    def join_voice(self, user) -> list:
+        """
+        Puts a player in the voice channel. A connection that was never
+        properly closed under the same nickname leaves it.
+        :return: the nicknames of the players already there, whom the newcomer
+            calls
+        """
+        self.voice = [member for member in self.voice if member is not user and member.name != user.name]
+        peers = self.voice_members()
+        self.voice.append(user)
+        return peers
+
+    def leave_voice(self, user) -> bool:
+        """
+        :return: False when user was not in the voice channel
+        """
+        if user not in self.voice:
+            return False
+        self.voice.remove(user)
+        return True
+
+    def voice_member(self, nickname):
+        """
+        The connection of a player in the voice channel, or None.
+        """
+        for user in self.voice:
+            if user.name == nickname:
+                return user
+        return None
+
+    def send_voice_members(self) -> None:
+        """
+        Tells everybody who is in the voice channel.
+        """
+        self.send({"event": "voice_members", "members": self.voice_members()})
 
     def send(self, message):
         # each user gets its own reading of the message: the hidden face of a

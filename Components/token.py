@@ -28,12 +28,16 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None, nationality=None):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None, nationality=None, block_sight=False):
         super().__init__(component_id)
         self.kind = 'token'
         # nationality: the side the token belongs to, among the nationalities
         # of the game; None on a token that belongs to nobody
         self.nationality = nationality if isinstance(nationality, str) and nationality else None
+        # block_sight: in the stack preview, the players of another nationality
+        # and the watchers do not see the tokens lying under this one. Only the
+        # boolean True counts.
+        self.block_sight = block_sight is True
         self.x = x
         self.y = y
         # origin : le jeu peut poser une image du pion en transparence sur sa
@@ -276,5 +280,6 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
             # seule chose qui survive telle quelle a une sauvegarde de session
             "origin_x": self.origin_x,
             "origin_y": self.origin_y,
-            "nationality": self.nationality
+            "nationality": self.nationality,
+            "block_sight": self.block_sight
         }
