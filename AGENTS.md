@@ -113,6 +113,7 @@ leur attache un errback de journalisation.
 | `voice_join` | `voice_joined` `{peers, ice_servers}` à l'appelant, puis `voice_members` `{members}` | appelant, puis session |
 | `voice_leave` | `voice_members` `{members}` | session |
 | `voice_signal` `{to, data}` | `voice_signal` `{from, data}` | le seul destinataire |
+| `chat_send` `{text, to?}` | `chat` `{message}` | session (général) ou les deux joueurs (privé) |
 | `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
 | `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` ; sur un `mw_character`, aussi `character_json` | session |
 | `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
@@ -219,7 +220,7 @@ Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
-`order_players`, `voice_join`, `voice_leave`, `voice_signal`.
+`order_players`, `voice_join`, `voice_leave`, `voice_signal`, `chat_send`.
 
 ## Configuration
 
@@ -587,6 +588,29 @@ dans toute partie ; les spectateurs n'y entrent pas (`watcher_not_allowed`).
   le service `obg-coturn` : configuration et mise en service dans
   `OBG/deploy/coturn/README.md`.
 - Tests : `tests/test_voice.py`.
+
+## Chat (`chat`)
+
+Chat texte de la session (`chat.py`, `ChatHistory`) : un **canal général**
+lu et écrit par tous (joueurs et spectateurs), et un **canal privé par paire
+de joueurs**, que ces deux seuls lisent. Aucune option de jeu.
+
+- Message : `{id, from, to, text, time}` ; `to` vaut `null` sur le canal
+  général, le pseudo de l'autre joueur sur un canal privé. `id` croît avec
+  chaque message de la session, tous canaux confondus ; `time` en ISO 8601 UTC.
+- `chat_send` `{text, to?}` : `text` est nettoyé de ses blancs, 1 à
+  `MAX_TEXT_LENGTH` (500) caractères (`invalid_chat_text`). Avec `to`, seul un
+  joueur écrit, à un autre siège de la partie, connecté ou non
+  (`Session.chat_partner`, sinon `unknown_player`). `Session.post_chat`
+  envoie l'événement `chat` à tous (général) ou aux connexions des deux
+  joueurs (privé), par `user.send`, sans `for_user`.
+- `return_session_json` porte `chat` : les messages que le lecteur peut lire
+  (`readable_by`), du plus ancien au plus récent ; sans lecteur, le général seul.
+- **Sauvegardé** dans l'état (`game_json_state`, clé `chat` :
+  `{general: [...], private: [{players: [a, b], messages: [...]}]}`), écrite
+  seulement si un message existe. `MAX_HISTORY` (200) messages gardés par
+  canal. Un historique mal formé est ignoré message par message.
+- Tests : `tests/test_chat.py`.
 
 ## Main privée (`hands`)
 

@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, voice_join, voice_leave, voice_signal, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, voice_join, voice_leave, voice_signal, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -117,6 +117,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 voice_leave(self, self.factory.lobby.logger, message)
             case "voice_signal": # a WebRTC message relayed to another player
                 voice_signal(self, self.factory.lobby.logger, message)
+            case "chat_send": # a message on the general chat channel, or to one player
+                chat_send(self, self.factory.lobby.logger, message)
             case "show_open": # a player shows cards of its hand to other players
                 show_open(self, self.factory.lobby.logger, message)
             case "show_add": # a player shows one more card of its hand

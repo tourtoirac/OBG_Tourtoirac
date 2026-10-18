@@ -1,6 +1,7 @@
 from unittest import loader
 
 from user import User
+from chat import ChatHistory
 from Components.bag import Bag
 from Components.board import Board
 from Components.board_group import BoardGroup
@@ -514,6 +515,9 @@ class Session:
         # the players in the voice channel of the session, in the order they
         # joined it: one entry per connection. Never saved.
         self.voice = []
+        # the text chat: a general channel and a private one between each pair
+        # of players. Saved with the state.
+        self.chat = ChatHistory.from_json(game_json.get('chat'))
         self.load_session_components()
         self.load_hands(game_json.get('hands'))
         # the components a randomizer of the setup lays on the table: when the
@@ -1516,6 +1520,10 @@ class Session:
                 nickname: [token.return_json() for token in held]
                 for nickname, held in self.hands.items()
             }
+        # the chat too, once somebody wrote in it
+        state.pop('chat', None)
+        if not self.chat.is_empty():
+            state['chat'] = self.chat.state_json()
         return state
 
     @staticmethod
@@ -1679,6 +1687,8 @@ class Session:
         # shows: the cards the players show of their hand, as far as the
         # reader may read them
         session_json["shows"] = self.shows_json(user)
+        # chat: the messages the reader may read, oldest first
+        session_json["chat"] = self.chat.readable_by(user.name if user is not None else None)
         if user is not None:
             session_json["components"] = self.for_user(session_json["components"], user)
             session_json["hand"] = self.for_user(session_json["hand"], user)
@@ -1913,6 +1923,33 @@ class Session:
         Tells everybody who is in the voice channel.
         """
         self.send({"event": "voice_members", "members": self.voice_members()})
+
+    def chat_partner(self, user, nickname):
+        """
+        The player a private message of user goes to: another player of the
+        game, at the table or not. Only a player writes privately.
+        :return: its nickname, or None
+        """
+        if user.role != 'player' or not isinstance(nickname, str) or nickname == user.name:
+            return None
+        return nickname if nickname in self.ordered_seats() else None
+
+    def post_chat(self, user, text: str, to: str | None = None) -> dict:
+        """
+        Adds a message to the chat and sends it to whoever reads its channel:
+        everybody for the general channel, the two players for a private one.
+        :return: the message
+        """
+        message = self.chat.post(user.name, text, to)
+        event = {"event": "chat", "message": message}
+        if to is None:
+            for reader in self.players + self.watchers:
+                reader.send(event)
+        else:
+            for reader in self.players + self.watchers:
+                if reader.name in (user.name, to):
+                    reader.send(event)
+        return message
 
     def send(self, message):
         # each user gets its own reading of the message: the hidden face of a

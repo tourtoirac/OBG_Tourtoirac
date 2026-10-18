@@ -5,6 +5,7 @@ from twisted.internet import defer
 from Components.deck import Deck
 from Components.token import ROTATION_STEP
 from session import MOVABLE_KINDS
+from chat import MAX_TEXT_LENGTH, read_text
 from voice import MAX_SIGNAL_SIZE, ice_servers
 
 # Un cran de rotation vaut ROTATION_STEP degres. Le client clique une zone et
@@ -793,6 +794,50 @@ def voice_signal(self, logger, message):
         return
 
     target.send({"event": "voice_signal", "from": user.name, "data": data})
+
+
+def chat_send(self, logger, message):
+    """
+    Sends a message on the chat of the session: on the general channel when
+    "to" is absent or null, which players and watchers write in, or to one
+    other player of the game, which only a player does.
+    """
+    logger.debug("Process chat_send message")
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error(
+            "unknown_user",
+            "No user is bound to this connection"
+        )
+        return
+
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            "The chat_send action requires an active session"
+        )
+        return
+
+    text = read_text(message.get("text"))
+    if text is None:
+        self.send_error(
+            "invalid_chat_text",
+            f"A chat message is a text of 1 to {MAX_TEXT_LENGTH} characters"
+        )
+        return
+
+    session = user.session
+    to = message.get("to")
+    if to is not None:
+        to = session.chat_partner(user, to)
+        if to is None:
+            self.send_error(
+                "unknown_player",
+                "A private message goes from a player to another player of the game"
+            )
+            return
+
+    session.post_chat(user, text, to)
 
 
 def resolve_show_action(self, action):
