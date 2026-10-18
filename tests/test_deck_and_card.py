@@ -9,8 +9,8 @@ test_bag.py, so the deck is covered even where autobahn is missing.
 import json
 
 from Components.card import Card
-from Components.deck import DECK_GAP, Deck
-from handle_message import acquire, draw, flip, refill, release, shuffle, take
+from Components.deck import DECK_GAP, DEFAULT_PICKUP_QUANTITIES, Deck
+from handle_message import acquire, draw, flip, refill, release, rotate, shuffle, take
 from session import DRAW_FAN, DRAW_MAX, Session, duplicate_component_ids
 from tests.test_bag import FakeProtocol, FakeUser, call, error_codes, movable_ids
 
@@ -439,6 +439,20 @@ class TestDrawingSeveralCards:
         call(draw, protocol, "deck", count=500)
         assert len(pile_ids(session)) == 5
 
+    def test_a_larger_pickup_button_raises_the_maximum(self):
+        cards = [card_json(f"card-{index}") for index in range(20)]
+        session = build_session(dict(DECK, components=cards, card_pickup_quantity=[3, 15]))
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=500)
+        assert len(pile_ids(session)) == 5
+
+    def test_smaller_pickup_buttons_keep_the_maximum(self):
+        cards = [card_json(f"card-{index}") for index in range(DRAW_MAX + 5)]
+        session = build_session(dict(DECK, components=cards, card_pickup_quantity=False))
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck", count=500)
+        assert len(pile_ids(session)) == 5
+
     def test_a_count_that_is_no_number_draws_one_card(self):
         for count in (0, -3, "5", 2.5, True, None):
             session = build_session()
@@ -457,3 +471,209 @@ class TestDrawingSeveralCards:
         protocol, alice, _, _ = two_players(session)
         call(draw, protocol, "deck")
         assert (alice.sent[-1]["index"], alice.sent[-1]["count"]) == (0, 1)
+
+
+class TestPickupQuantities:
+    """card_pickup_quantity: the multi-draw buttons the client shows on a pile."""
+
+    def quantities(self, **fields):
+        return build_session(dict(DECK, **fields)).get_component("deck").return_json()["card_pickup_quantity"]
+
+    def test_absent_gives_the_default_buttons(self):
+        assert self.quantities() == list(DEFAULT_PICKUP_QUANTITIES) == [2, 5, 10]
+
+    def test_false_gives_no_button(self):
+        assert self.quantities(card_pickup_quantity=False) == []
+
+    def test_a_list_gives_its_buttons_in_order(self):
+        assert self.quantities(card_pickup_quantity=[4, 1, 7]) == [4, 1, 7]
+
+    def test_only_whole_numbers_above_zero_are_kept_five_at_most(self):
+        value = [3, "4", 0, -1, True, 2.5, None, 3, 7, 8, 9, 11, 12]
+        assert self.quantities(card_pickup_quantity=value) == [3, 7, 8, 9, 11]
+
+    def test_anything_else_gives_the_default_buttons(self):
+        for value in (True, "5", 5, None, {"a": 1}):
+            assert self.quantities(card_pickup_quantity=value) == [2, 5, 10]
+
+    def test_the_saved_state_keeps_the_buttons(self):
+        for value, expected in ((False, []), ([3, 6], [3, 6]), (None, [2, 5, 10])):
+            session = build_session(dict(DECK, card_pickup_quantity=value))
+            state = json.loads(json.dumps(session.game_json_state()))
+            resumed = Session(
+                user=None, name="JudgeDredd", key="KEY1", code="CODE1",
+                active=True, variant="std", game_json=state, started=True,
+            )
+            assert resumed.get_component("deck").card_pickup_quantity == expected
+
+
+class TestOrientation:
+    """orientation: the piles of a deck or a stack are turned around their center."""
+
+    def deck(self, **fields):
+        return build_session(dict(DECK, **fields)).get_component("deck")
+
+    def test_absent_or_wrong_is_upright(self):
+        for value in (None, "90", True, 45, 100.5):
+            assert self.deck(orientation=value).return_json()["orientation"] == 0
+        assert self.deck().orientation == 0
+
+    def test_a_quarter_turn_is_kept_modulo_360(self):
+        assert [self.deck(orientation=value).orientation for value in (90, 180, 270, -90, 450)] == [
+            90, 180, 270, 270, 90,
+        ]
+
+    def test_a_quarter_turn_swaps_the_footprint_around_the_center(self):
+        # DECK: x 100, y 100, 60 x 90, center (130, 145)
+        deck = self.deck(orientation=270)
+        assert deck.footprint("draw") == (85, 115, 90, 60)
+        assert deck.pile_at(86, 120) == "draw"
+        assert deck.pile_at(105, 105) is None
+        assert self.deck(orientation=180).footprint("draw") == (100, 100, 60, 90)
+
+    def test_a_card_drawn_is_upright(self):
+        session = build_session(dict(DECK, orientation=90))
+        protocol, alice, *_ = two_players(session)
+        call(draw, protocol, "deck", x=300, y=300)
+        assert session.get_component("queen").orientation == 0
+        assert alice.sent[-1]["component_json"]["orientation"] == 0
+        call(draw, protocol, "deck", x=300, y=300, count=2)
+        assert [session.get_component(name).orientation for name in ("king", "ace")] == [0, 0]
+
+    def test_the_saved_state_keeps_it(self):
+        session = build_session(dict(DECK, orientation=270))
+        state = json.loads(json.dumps(session.game_json_state()))
+        resumed = Session(
+            user=None, name="JudgeDredd", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=state, started=True,
+        )
+        assert resumed.get_component("deck").orientation == 270
+
+
+class TestCardRotation:
+    """A card turns by steps of 45 degrees only when the game declares it
+    orientable; a hand sets it upright, a deck turns it like itself."""
+
+    def orientable_session(self, **fields):
+        return build_session(dict(DECK, **fields), movable=[dict(JOKER, orientable=True), ARMY])
+
+    def test_an_orientable_card_on_the_table_turns_for_everybody(self):
+        session = self.orientable_session()
+        protocol, alice, _, bob = two_players(session)
+        call(rotate, protocol, "joker", direction="right")
+        assert session.get_component("joker").orientation == 45
+        for user in (alice, bob):
+            assert user.sent[-1] == {"event": "rotate", "component_id": "joker", "orientation": 45}
+        call(rotate, protocol, "joker", direction="left")
+        call(rotate, protocol, "joker", direction="left")
+        assert session.get_component("joker").orientation == 315
+
+    def test_a_card_absent_or_false_does_not_turn(self):
+        for movable in ([JOKER], [dict(JOKER, orientable=False)]):
+            session = build_session(movable=movable)
+            protocol, *_ = two_players(session)
+            assert session.get_component("joker").return_json()["orientable"] is False
+            call(rotate, protocol, "joker", direction="right")
+            assert error_codes(protocol) == ["component_not_rotatable"]
+            assert session.get_component("joker").orientation == 0
+
+    def test_a_card_inside_a_deck_does_not_turn(self):
+        session = build_session(dict(DECK, components=[dict(QUEEN, orientable=True)]))
+        protocol, *_ = two_players(session)
+        call(rotate, protocol, "queen", direction="right")
+        assert error_codes(protocol) == ["component_in_deck"]
+        assert session.get_component("queen").orientation == 0
+
+    def test_a_held_card_does_not_turn(self):
+        session = self.orientable_session()
+        protocol, _, other, _ = two_players(session)
+        call(acquire, other, "joker")
+        call(rotate, protocol, "joker", direction="right")
+        assert error_codes(protocol) == ["component_held"]
+
+    def test_a_card_kept_in_hand_stands_upright(self):
+        session = self.orientable_session()
+        protocol, alice, *_ = two_players(session)
+        call(rotate, protocol, "joker", direction="right")
+        call(acquire, protocol, "joker")
+        call(release, protocol, "joker", x=0, y=0, hand=True)
+        assert session.get_component("joker").orientation == 0
+        assert alice.sent[-1]["component_json"]["orientation"] == 0
+        call(take, protocol, "joker", x=300, y=300)
+        assert session.get_component("joker").orientation == 0
+
+    def test_a_card_drawn_from_a_turned_deck_is_upright_in_hand(self):
+        session = build_session(dict(DECK, orientation=90))
+        protocol, *_ = two_players(session)
+        call(draw, protocol, "deck")
+        call(release, protocol, "queen", x=0, y=0, hand=True)
+        assert session.get_component("queen").orientation == 0
+
+    def test_a_card_put_on_a_deck_takes_its_orientation(self):
+        session = self.orientable_session(orientation=270)
+        protocol, *_ = two_players(session)
+        call(rotate, protocol, "joker", direction="right")
+        drop_on(protocol, "joker", "draw", session)
+        assert pile_ids(session)[-1] == "joker"
+        assert session.get_component("joker").orientation == 270
+        # taken back, it stands upright again
+        call(draw, protocol, "deck", x=300, y=300)
+        assert session.get_component("joker").orientation == 0
+
+    def test_a_card_put_on_an_upright_deck_stands_upright(self):
+        session = self.orientable_session()
+        protocol, *_ = two_players(session)
+        call(rotate, protocol, "joker", direction="right")
+        drop_on(protocol, "joker", "discard", session)
+        assert session.get_component("joker").orientation == 0
+
+    def test_the_saved_state_keeps_the_angle_and_the_choice(self):
+        session = self.orientable_session()
+        protocol, *_ = two_players(session)
+        call(rotate, protocol, "joker", direction="right")
+        state = json.loads(json.dumps(session.game_json_state()))
+        resumed = Session(
+            user=None, name="JudgeDredd", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=state, started=True,
+        )
+        assert resumed.get_component("joker").orientation == 45
+        assert resumed.get_component("joker").orientable is True
+
+
+class TestText:
+    """text: the caption above a deck; absent, null, empty or not a text, none."""
+
+    def test_no_caption_without_a_text(self):
+        for fields in ({}, {"text": None}, {"text": ""}, {"text": 12}):
+            assert build_session(dict(DECK, **fields)).get_component("deck").return_json()["text"] is None
+
+    def test_a_text_is_carried_as_is(self):
+        assert build_session(dict(DECK, text="Pioche")).get_component("deck").return_json()["text"] == "Pioche"
+
+
+class TestDisplayShuffle:
+    """display_shuffle: only false hides the Shuffle buttons of a deck."""
+
+    def test_absent_or_true_shows_them(self):
+        for fields in ({}, {"display_shuffle": True}, {"display_shuffle": None}, {"display_shuffle": 0}):
+            assert build_session(dict(DECK, **fields)).get_component("deck").return_json()["display_shuffle"] is True
+
+    def test_false_hides_them_and_refuses_the_shuffle(self):
+        session = build_session(dict(DECK, display_shuffle=False))
+        assert session.get_component("deck").return_json()["display_shuffle"] is False
+        protocol, *_ = two_players(session)
+        call(shuffle, protocol, "deck", pile="draw")
+        assert error_codes(protocol) == ["shuffle_disabled"]
+        assert pile_ids(session) == ["ace", "king", "queen"]
+
+    def test_the_shuffle_at_startup_still_happens(self):
+        orders = {
+            tuple(pile_ids(build_session(dict(DECK, display_shuffle=False, shuffle_at_startup=True,
+                                              components=[card_json(f"c{index}") for index in range(8)]))))
+            for _ in range(30)
+        }
+        assert len(orders) > 1
+
+    def test_the_saved_state_keeps_it(self):
+        state = build_session(dict(DECK, display_shuffle=False)).game_json_state()
+        assert state["fixed"][0]["display_shuffle"] is False

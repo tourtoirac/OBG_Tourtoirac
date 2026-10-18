@@ -13,7 +13,12 @@ game_json, rather than by the list of its hexes:
         "size": 64.3,            # center-to-corner radius of a hex
         "size_y": 63.8,          # optional: vertical radius, for a scan that
                                  # is slightly stretched (defaults to size)
-        "snap_radius": 40        # optional: no snap beyond this distance
+        "snap_radius": 40,       # optional: no snap beyond this distance
+        "area": {                # optional: the part of the board the hexes
+            "x": 79, "y": 304,   # are printed on; a token dropped outside
+            "width": 2251,       # it is not snapped (defaults to the whole
+            "height": 2556       # board)
+        }
     }
 
 Coordinates are in the units of the board's game_json width and height (the
@@ -57,16 +62,33 @@ def cube_round(q: float, r: float) -> tuple[int, int]:
     return rq, rr
 
 
+def read_area(raw) -> tuple[float, float, float, float] | None:
+    """
+    Reads the "area" of a grid: a rectangle relative to the board's top-left
+    corner, in game_json units.
+    :return: (x, y, width, height), or None when the rectangle is malformed
+    """
+    if not isinstance(raw, dict):
+        return None
+    values = [read_number(raw.get(field)) for field in ('x', 'y', 'width', 'height')]
+    if any(value is None for value in values) or values[2] <= 0 or values[3] <= 0:
+        return None
+    return tuple(values)
+
+
 class HexGrid:
     def __init__(self, orientation: str, origin_x: float, origin_y: float,
                  size: float, size_y: float | None = None,
-                 snap_radius: float | None = None):
+                 snap_radius: float | None = None,
+                 area: tuple[float, float, float, float] | None = None):
         self.orientation = orientation
         self.origin_x = origin_x
         self.origin_y = origin_y
         self.size = size
         self.size_y = size if size_y is None else size_y
         self.snap_radius = snap_radius
+        # (x, y, width, height) relative to the board, None for the whole board
+        self.area = area
 
     @classmethod
     def from_json(cls, raw):
@@ -96,7 +118,23 @@ class HexGrid:
         # a null or negative radius means "no limit", like an absent one
         if snap_radius is not None and snap_radius <= 0:
             snap_radius = None
-        return cls(orientation, origin_x, origin_y, size, size_y, snap_radius)
+        area = None
+        if 'area' in raw and raw['area'] is not None:
+            area = read_area(raw['area'])
+            # a wrong area could snap tokens all over the board: no grid at all
+            if area is None:
+                return None
+        return cls(orientation, origin_x, origin_y, size, size_y, snap_radius, area)
+
+    def in_area(self, x: float, y: float) -> bool:
+        """
+        Whether (x, y), relative to the board, lies on the part of the board the
+        hexes are printed on. Without area, the whole board is.
+        """
+        if self.area is None:
+            return True
+        left, top, width, height = self.area
+        return left <= x <= left + width and top <= y <= top + height
 
     def nearest_center(self, x: float, y: float) -> tuple[float, float]:
         """
@@ -124,9 +162,11 @@ class HexGrid:
     def snap(self, x: float, y: float) -> tuple[float, float] | None:
         """
         Where a point dropped at (x, y) lands, relative to the board.
-        :return: the center of the nearest hex, or None when it is further
-            than snap_radius
+        :return: the center of the nearest hex, or None when the point is
+            outside the area or further than snap_radius from that center
         """
+        if not self.in_area(x, y):
+            return None
         cx, cy = self.nearest_center(x, y)
         if self.snap_radius is not None and math.hypot(cx - x, cy - y) > self.snap_radius:
             return None
@@ -145,4 +185,7 @@ class HexGrid:
             grid["size_y"] = self.size_y
         if self.snap_radius is not None:
             grid["snap_radius"] = self.snap_radius
+        if self.area is not None:
+            left, top, width, height = self.area
+            grid["area"] = {"x": left, "y": top, "width": width, "height": height}
         return grid

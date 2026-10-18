@@ -165,6 +165,13 @@ class Component:
         """
         return False
 
+    def markable(self) -> bool:
+        """
+        Whether this component has boxes a click marks. Only an mw_character does.
+        :return: True when the component may be marked
+        """
+        return False
+
     def shuffle(self, container_name: str):
         """
         placeholder function

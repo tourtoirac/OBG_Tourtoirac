@@ -9,7 +9,10 @@ class Card(Token):
     What sets it apart is its face: the front of a card lying on its back is
     told to nobody but the player keeping it in a private hand (see
     Session.sees_hidden_face). A card has no starting square, so it never
-    shows the green rectangle of a token.
+    shows the green rectangle of a token. A card turns by steps of 45 degrees
+    only when the game declares it orientable, like a token. It is set back
+    upright when it joins a private hand, and takes the orientation of the
+    deck or stack it is put on (Session.enter_hand, Session.put_in_deck).
     """
     def __init__(self, component_id, x, y, front_image, back_image, width, height,
                  orientation=0, side=None, nationality=None, orientable=False, border=None):

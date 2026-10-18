@@ -50,7 +50,8 @@ def sherlock_game_json(stack: bool = True) -> dict:
             {"kind": "deck", "id": PACK, "type": "duo", "x": 900, "y": 300, **size,
              "discard_x": 1200, "discard_y": 300, "shuffle_at_startup": True,
              "components": [card(name, copies) for name, copies in PACK_CARDS.items()]},
-            {"kind": "stack" if stack else "deck", "id": DEAL, "x": 1860, "y": 300, **size, "components": []},
+            {"kind": "stack" if stack else "deck", "id": DEAL, "x": 1860, "y": 300, **size, "components": [],
+             **({"deal": True} if stack else {})},
         ],
         "movable": [card("game_afoot", x=300, y=900, side="back", **size)],
     }

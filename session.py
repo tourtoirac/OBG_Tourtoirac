@@ -6,12 +6,14 @@ from Components.board import Board
 from Components.board_group import BoardGroup
 from Components.card import Card
 from Components.counter import Counter, DEFAULT_COUNTER_COLOR
+from Components.mw_character import MwCharacter
 from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
 from Components.stack import Stack
 from Components.token import Token
 
+import random
 import uuid
 
 
@@ -24,6 +26,15 @@ SETUP_POSITION_FIELDS = ('x', 'y')
 # les deux faces qu'un setup peut demander pour un composant qui se retourne
 SETUP_SIDES = ('front', 'back')
 
+# randomizer: a setup entry that lays components drawn at random on a list of
+# targets. Its source is a container (the kind of the component named by
+# source_id) or a list of component ids.
+RANDOMIZER_KIND = 'randomizer'
+RANDOMIZER_CONTAINER_KINDS = ('bag', 'deck', 'stack')
+RANDOMIZER_ID_LIST = 'id_list'
+# the piles a randomizer target may name in a deck or a stack
+RANDOMIZER_TARGET_PILES = ('draw', 'discard')
+
 # the field holding the face a token does not show, by the side it shows
 HIDDEN_FACE_FIELDS = {'back': 'front_src', 'front': 'back_src'}
 
@@ -34,7 +45,8 @@ MOVABLE_KINDS = ('token', 'card')
 # discard pile a saved state adds
 DECK_CARD_LISTS = ('components', 'discard')
 
-# the most cards one draw action takes out of a pile, and how far apart, in
+# the most cards one draw action takes out of a pile, unless the deck has a
+# multi-draw button for more (card_pickup_quantity), and how far apart, in
 # pixels, they come out: side by side, so the player sees how many it holds
 DRAW_MAX = 10
 DRAW_FAN = 20
@@ -56,6 +68,55 @@ def read_coordinate(value):
     return int(value)
 
 
+def read_randomizer(entry: dict) -> dict | None:
+    """
+    Reads a randomizer of the setup. A badly written one is ignored, like any
+    setup entry: the game starts without it.
+    :param entry: {"kind": "randomizer", "source_kind", "source_id", "targets"}
+    :return: the cleaned randomizer, or None when it cannot be used: unknown
+        source_kind, source_id of the wrong type, or no usable target
+    """
+    source_kind = entry.get('source_kind')
+    source_id = entry.get('source_id')
+    if source_kind == RANDOMIZER_ID_LIST:
+        if not isinstance(source_id, list):
+            return None
+        source_id = [item for item in source_id if isinstance(item, str) and item]
+    elif source_kind in RANDOMIZER_CONTAINER_KINDS:
+        if not isinstance(source_id, str) or not source_id:
+            return None
+    else:
+        return None
+
+    targets = []
+    for target in entry.get('targets') if isinstance(entry.get('targets'), list) else []:
+        if not isinstance(target, dict):
+            continue
+        # a target is a deck or a stack: the card drawn goes on one of its
+        # piles, as if it were released on it (Session.put_in_deck)
+        container_id = target.get('container_id')
+        if isinstance(container_id, str) and container_id:
+            cleaned = {'container_id': container_id}
+            if target.get('pile') in RANDOMIZER_TARGET_PILES:
+                cleaned['pile'] = target['pile']
+            targets.append(cleaned)
+            continue
+        # or a place: without both coordinates there is nowhere to put a
+        # component, and it is skipped
+        cleaned = {field: read_coordinate(target.get(field)) for field in SETUP_POSITION_FIELDS}
+        if None in cleaned.values():
+            continue
+        if target.get('side') in SETUP_SIDES:
+            cleaned['side'] = target['side']
+        orientation = target.get('orientation')
+        if isinstance(orientation, (int, float)) and not isinstance(orientation, bool):
+            cleaned['orientation'] = int(orientation)
+        targets.append(cleaned)
+    if not targets:
+        return None
+    return {'kind': RANDOMIZER_KIND, 'source_kind': source_kind, 'source_id': source_id, 'targets': targets}
+
+
 def read_setup(setup):
     """
     Lit le setup d'un jeu : la liste des modifications a apporter apres
@@ -70,6 +131,13 @@ def read_setup(setup):
     entries = []
     for entry in setup:
         if not isinstance(entry, dict):
+            continue
+        # a randomizer stays as it is: the session draws its components once
+        # they are built (Session.resolve_randomizers)
+        if entry.get('kind') == RANDOMIZER_KIND:
+            randomizer = read_randomizer(entry)
+            if randomizer is not None:
+                entries.append(randomizer)
             continue
         component_id = entry.get('component_id')
         if not isinstance(component_id, str) or not component_id:
@@ -280,14 +348,21 @@ def anonymize_ids(game_json: dict) -> dict:
         result['movable'] = anonymized(game_json['movable'])
     if isinstance(game_json.get('fixed'), list):
         result['fixed'] = [anonymized_container(component) for component in game_json['fixed']]
+    def renamed_entry(entry):
+        if not isinstance(entry, dict):
+            return entry
+        if isinstance(entry.get('component_id'), str) and entry['component_id'] in new_ids:
+            return dict(entry, component_id=new_ids[entry['component_id']])
+        # the ids a randomizer draws from are renamed too
+        if entry.get('kind') == RANDOMIZER_KIND and entry.get('source_kind') == RANDOMIZER_ID_LIST \
+                and isinstance(entry.get('source_id'), list):
+            return dict(entry, source_id=[
+                new_ids.get(item, item) if isinstance(item, str) else item for item in entry['source_id']
+            ])
+        return entry
+
     if isinstance(game_json.get('setup'), list):
-        result['setup'] = [
-            dict(entry, component_id=new_ids[entry['component_id']])
-            if isinstance(entry, dict) and isinstance(entry.get('component_id'), str)
-            and entry['component_id'] in new_ids
-            else entry
-            for entry in game_json['setup']
-        ]
+        result['setup'] = [renamed_entry(entry) for entry in game_json['setup']]
     return result
 
 
@@ -323,6 +398,8 @@ def duplicate_component_ids(game_json: dict) -> list:
             elif component.get('kind') == 'bag' and isinstance(component.get('components'), list):
                 # the tokens of a bag may ask for copies too
                 nested = expand_components(component['components'])
+            elif component.get('kind') == 'mw_character' and isinstance(component.get('cards'), list):
+                nested = component['cards']
             elif component.get('kind') in DECK_KINDS:
                 # and so may the cards of a deck, in either of its piles
                 nested = [
@@ -439,6 +516,10 @@ class Session:
         self.voice = []
         self.load_session_components()
         self.load_hands(game_json.get('hands'))
+        # the components a randomizer of the setup lays on the table: when the
+        # setup is applied, they leave the bag or the deck holding them
+        self.setup_take_out = set()
+        self.setup = self.resolve_randomizers(self.setup)
         # does a token of this game belong to a nationality, or is it a card ?
         # Without any, nothing is hidden from anybody and messages go out
         # untouched
@@ -503,6 +584,34 @@ class Session:
                             self.components_dict[component['id']] = game_component
                         case 'deck' | 'stack' if list_name == 'fixed':
                             game_component = self.build_deck(component)
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                        case 'mw_character' if list_name == 'fixed':
+                            # mw_character: a card that never moves, with two columns of boxes
+                            game_component = MwCharacter(
+                                component['id'],
+                                component['x'],
+                                component['y'],
+                                component['width'],
+                                component['height'],
+                                component['front_src'],
+                                component.get('back_src'),
+                                # side and marks: only there on a saved session
+                                component.get('side'),
+                                component.get('nationality'),
+                                component.get('left'),
+                                component.get('right'),
+                            )
+                            # the cards under it, the last one on top: a
+                            # card without a size takes the one of the character
+                            for card in component.get('cards') or []:
+                                built = build_checked(
+                                    lambda description: self.build_card(description, component),
+                                    card, list_name, component['id'],
+                                )
+                                built.set_side('front')
+                                game_component.cards.append(built)
+                                self.components_dict[built.id] = built
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
                         case 'token' if list_name == 'movable':
@@ -603,6 +712,7 @@ class Session:
             component.get('orientation', 0),
             component.get('side'),
             component.get('nationality'),
+            # whether the players may turn the card, only when it says so
             component.get('orientable', False),
             component.get('border'),
         )
@@ -659,6 +769,12 @@ class Session:
                 component.get('back_src'),
                 piles['components'] + piles['discard'],
                 component.get('text'),
+                component.get('card_pickup_quantity'),
+                component.get('orientation'),
+                # the Deal button: only when the game says true
+                component.get('deal'),
+                # the Shuffle button: hidden only when the game says false
+                component.get('display_shuffle'),
             )
         return Deck(
             component['id'],
@@ -676,6 +792,12 @@ class Session:
             # where the discard pile lies; next to the draw pile by default
             component.get('discard_x'),
             component.get('discard_y'),
+            # the multi-draw buttons: a list of numbers, false for none
+            component.get('card_pickup_quantity'),
+            # the angle the piles are turned by: 0, 90, 180 or 270
+            component.get('orientation'),
+            # the Shuffle buttons: hidden only when the game says false
+            component.get('display_shuffle'),
         )
 
     def deck_holding(self, component) -> Deck | None:
@@ -717,13 +839,15 @@ class Session:
         movable = self.components_lists['movable']
         if component in movable:
             movable.remove(component)
+        # the card lies turned like the deck it is put on
+        component.tap(deck.orientation)
         deck.add(pile, component)
 
     def draw_from_deck(self, deck: Deck, pile: str, user: User, x=None, y=None):
         """
         Takes the top card of a pile and puts it in the hand of user: it comes
         back on the table, above the others, centered on (x, y), on the side
-        it had on its pile.
+        it had on its pile and upright.
         :param x: where the player clicked; the center of the pile when the
             client gives no usable point
         :return: the card, or None when the pile has none user may take: it
@@ -737,6 +861,8 @@ class Session:
             x = pile_x + deck.width / 2
             y = pile_y + deck.height / 2
         card.enter_table(x - card.width / 2, y - card.height / 2)
+        # the card comes out upright, whatever the angle of its deck
+        card.tap(0)
         self.components_lists['movable'].append(card)
         card.acquire(user)
         return card
@@ -746,8 +872,9 @@ class Session:
         Takes the top cards of a pile, one after the other, and puts them all
         in the hand of user. They come out fanned to the right of (x, y), the
         top card of the pile first, so it ends up under the others.
-        :param count: how many cards are asked for, DRAW_MAX at most; anything
-            that is not a whole number above zero counts as one
+        :param count: how many cards are asked for, at most DRAW_MAX or the
+            largest multi-draw button of the deck; anything that is not a
+            whole number above zero counts as one
         :return: the cards drawn, fewer than asked when the pile runs out or
             shows a card user may not take, empty when it gives none
         """
@@ -755,7 +882,8 @@ class Session:
             count = 1
         has_point = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y))
         cards = []
-        for index in range(min(count, DRAW_MAX)):
+        limit = max([DRAW_MAX, *deck.card_pickup_quantity])
+        for index in range(min(count, limit)):
             card = self.draw_from_deck(deck, pile, user, x + index * DRAW_FAN if has_point else None, y)
             if card is None:
                 break
@@ -1040,13 +1168,15 @@ class Session:
     def enter_hand(self, nickname: str, component) -> None:
         """
         Adds a component to the private hand of a player. A card joins it face
-        up: its holder reads it at once, and it will show that face when it is
+        up and upright: its holder reads it at once, and it will show that face when it is
         played, unless the holder turns it over in the hand before. The other
         players never read the front of a card held in a hand (for_user).
         """
         if isinstance(component, Card):
             # a card without a back has one single face and keeps it
             component.set_side('front')
+            # and a card held in a hand stands upright
+            component.tap(0)
         self.hands.setdefault(nickname, []).append(component)
 
     def take_from_hand(self, user: User, component, x=None, y=None) -> bool:
@@ -1127,6 +1257,63 @@ class Session:
             if isinstance(candidate, Bag) and candidate.contains(center_x, center_y):
                 return candidate
         return None
+
+    def character_at(self, component, x, y, user) -> MwCharacter | None:
+        """
+        The mw_character a card released at (x, y) goes under: the one its
+        center lies on, if user may touch it (its nationality).
+        :param x: top-left corner of the card, as sent by the client
+        :return: the character, or None when the card stays on the table
+        """
+        if not isinstance(component, Card):
+            return None
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            return None
+        center_x = x + component.width / 2
+        center_y = y + component.height / 2
+        for candidate in reversed(self.components_lists['fixed']):
+            if isinstance(candidate, MwCharacter) and candidate.contains(center_x, center_y):
+                return candidate if candidate.acquirable_by(user) else None
+        return None
+
+    def character_holding(self, component) -> MwCharacter | None:
+        """The mw_character a card lies under, or None."""
+        for candidate in self.components_lists['fixed']:
+            if isinstance(candidate, MwCharacter) and any(card is component for card in candidate.cards):
+                return candidate
+        return None
+
+    def put_under_character(self, character: MwCharacter, card) -> None:
+        """
+        Moves a card from the table under an mw_character: it leaves
+        "movable", loses its position, and lies face up and upright, its
+        front read by everybody.
+        """
+        movable = self.components_lists['movable']
+        if card in movable:
+            movable.remove(card)
+        card.leave_table()
+        card.set_side('front')
+        card.tap(0)
+        character.cards.append(card)
+
+    def take_from_character(self, character: MwCharacter, user: User, x=None, y=None):
+        """
+        Takes the last card put under an mw_character and puts it in the hand
+        of user: it comes back on the table, above the others, centered on
+        (x, y), face up.
+        :return: the card, or None when there is none under the character
+        """
+        if not character.cards:
+            return None
+        card = character.cards.pop()
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            x = character.x + character.width / 2
+            y = character.y + character.height / 2
+        card.enter_table(x - card.width / 2, y - card.height / 2)
+        self.components_lists['movable'].append(card)
+        card.acquire(user)
+        return card
 
     def put_in_bag(self, bag: Bag, component):
         """
@@ -1803,6 +1990,106 @@ class Session:
             fixed.append(component.return_json())
         return fixed
 
+    def resolve_randomizers(self, setup: list) -> list:
+        """
+        Draws the components of each randomizer of the setup, at random, one
+        for each of its targets, and turns the randomizer into the plain setup
+        entries that lay them there. It is done once, when the session is
+        built: every player then applies the same draw, and the setup stays
+        idempotent. A session rebuilt before its setup is applied draws again,
+        nothing having moved yet.
+
+        A component is drawn at most once, across all the randomizers. A
+        source holding fewer components than targets fills the first targets
+        only. A target naming a deck or a stack only takes a card, and is
+        skipped when that container does not exist or has no such pile.
+        :param setup: the entries of read_setup
+        :return: the setup without randomizers, in the same order
+        """
+        drawn = set()
+        resolved = []
+        for entry in setup:
+            if entry.get('kind') != RANDOMIZER_KIND:
+                resolved.append(entry)
+                continue
+            candidates = [
+                component for component in self.randomizer_candidates(entry)
+                if component.id not in drawn
+            ]
+            random.shuffle(candidates)  # NOSONAR
+            for target in entry['targets']:
+                if 'container_id' in target:
+                    target = self.container_target(target)
+                    if target is None:
+                        continue
+                    # only a card goes in a deck
+                    component = next((card for card in candidates if isinstance(card, Card)), None)
+                else:
+                    component = candidates[0] if candidates else None
+                if component is None:
+                    continue
+                candidates.remove(component)
+                drawn.add(component.id)
+                self.setup_take_out.add(component.id)
+                resolved.append(dict(target, component_id=component.id))
+        return resolved
+
+    def container_target(self, target: dict) -> dict | None:
+        """
+        A randomizer target naming a deck or a stack, with the pile the card
+        goes on: the draw pile when it names none.
+        :return: None when there is no such deck or stack, or no such pile
+        """
+        container = self.components_dict.get(target['container_id'])
+        pile = target.get('pile', 'draw')
+        if not isinstance(container, Deck) or pile not in container.piles:
+            return None
+        return {'container_id': container.id, 'pile': pile}
+
+    def randomizer_candidates(self, randomizer: dict) -> list:
+        """
+        The components a randomizer may draw: those of its container (a bag,
+        or the draw pile of a deck or a stack), or those of its id list that
+        are tokens or cards. Unknown ids, and a container of another kind than
+        source_kind, give nothing.
+        """
+        source_id = randomizer['source_id']
+        if randomizer['source_kind'] == RANDOMIZER_ID_LIST:
+            candidates = []
+            for component_id in source_id:
+                component = self.components_dict.get(component_id)
+                if isinstance(component, Token) and component not in candidates \
+                        and self.hand_holding(component) is None \
+                        and self.character_holding(component) is None:
+                    candidates.append(component)
+            return candidates
+        container = self.components_dict.get(source_id)
+        if getattr(container, 'kind', None) != randomizer['source_kind']:
+            return []
+        if isinstance(container, Bag):
+            return list(container.components)
+        if isinstance(container, Deck):
+            return list(container.piles['draw'])
+        return []
+
+    def take_out_for_setup(self, component):
+        """
+        Takes a component a randomizer drew out of the bag or the deck holding
+        it, onto the table, above the others. Its position is the setup's.
+        :return: the container it left, or None when it was already out
+        """
+        container = self.bag_holding(component)
+        if container is not None:
+            container.components.remove(component)
+        else:
+            container = self.deck_holding(component)
+            if container is None:
+                return None
+            container.piles[container.pile_holding(component)].remove(component)
+        component.enter_table(0, 0)
+        self.components_lists['movable'].append(component)
+        return container
+
     def pending_setup(self) -> list:
         """
         Le setup tant qu'il n'a pas ete applique. La liste redevient vide une
@@ -1826,6 +2113,9 @@ class Session:
         """
         movable_ids = {component.id for component in self.components_lists['movable']}
         applied = {}
+        # the bags and decks a randomizer took components out of: each screen
+        # reads them again
+        emptied = {}
 
         for entry in self.setup:
             component = self.components_dict.get(entry['component_id'])
@@ -1833,6 +2123,27 @@ class Session:
                 # un setup qui parle d'un composant que le jeu ne declare pas
                 # est une faute de saisie : on l'ignore, la partie demarre
                 continue
+
+            if 'container_id' in entry:
+                # the card goes on a pile of a deck or a stack, as if it were
+                # released on it; it is already there when the setup is applied
+                # a second time
+                target = self.components_dict.get(entry['container_id'])
+                if self.deck_holding(component) is not target:
+                    container = self.take_out_for_setup(component)
+                    if container is not None:
+                        emptied[container.id] = container
+                    self.put_in_deck(target, entry['pile'], component)
+                emptied[target.id] = target
+                # each screen takes the card off the table: it has no position
+                applied[component.id] = component.return_json()
+                continue
+
+            if component.id in self.setup_take_out:
+                container = self.take_out_for_setup(component)
+                if container is not None:
+                    emptied[container.id] = container
+                movable_ids.add(component.id)
 
             moved = False
             # a token inside a bag has no position: the setup may only choose
@@ -1863,10 +2174,17 @@ class Session:
             if 'side' in entry:
                 component.set_side(entry['side'])
 
+            # only a randomizer target gives an orientation
+            if 'orientation' in entry and isinstance(component, Token):
+                component.tap(entry['orientation'])
+
             # un composant peut figurer dans deux entrees, une qui le deplace et
             # une qui le retourne : on ne l'annonce qu'une fois, dans son etat
             # final
             applied[component.id] = component.return_json()
+
+        for container in emptied.values():
+            applied[container.id] = container.return_json()
 
         self.setup_done = True
         return list(applied.values())

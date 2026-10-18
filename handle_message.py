@@ -417,6 +417,15 @@ def refuse_modification(self, user, component) -> bool:
         )
         return True
 
+    # a card under an mw_character is out of reach: it only comes out through
+    # pick, the last one put first
+    if user.session.character_holding(component) is not None:
+        self.send_error(
+            "component_under_character",
+            f"Component {component.id} lies under a character"
+        )
+        return True
+
     # a token in a private hand is off the table: only its holder plays it
     # again, through take
     if user.session.hand_holding(component) is not None:
@@ -476,6 +485,7 @@ def release(self, logger, message):
     # revenir si le jeton retrouve son emplacement initial
     bag = None
     deck, pile = None, None
+    character = None
     # hand: true asks to keep the token in the private hand of the player
     # instead of putting it down. Only a token or a card goes there.
     # A game without private hands puts the token down where it is released.
@@ -501,7 +511,10 @@ def release(self, logger, message):
         bag = user.session.bag_at(component, message["x"], message["y"])
         # and a card released over a pile of a deck joins that pile
         deck, pile = user.session.deck_at(component, message["x"], message["y"])
+        # and a card released over an mw_character goes under it
         if bag is None and deck is None:
+            character = user.session.character_at(component, message["x"], message["y"], user)
+        if bag is None and deck is None and character is None:
             # on a board with a hex grid, the token is pulled onto the nearest hex
             x, y = user.session.snap_to_grid(component, message["x"], message["y"])
             component.place(x, y, user)
@@ -509,6 +522,7 @@ def release(self, logger, message):
     if not released:
         bag = None
         deck, pile = None, None
+        character = None
         to_hand = False
     elif to_hand:
         # the token leaves the table for the hand of the player, or of the
@@ -520,6 +534,9 @@ def release(self, logger, message):
     elif deck is not None:
         # the card goes on top of the pile: it leaves the table
         user.session.put_in_deck(deck, pile, component)
+    elif character is not None:
+        # the card goes under the character: it leaves the table
+        user.session.put_under_character(character, component)
     else:
         # un pion relâché se pose au-dessus de la pile : il repasse en fin de
         # liste, l'ordre que le client dessine et que la sauvegarde conserve
@@ -537,6 +554,10 @@ def release(self, logger, message):
                 "deck_id": deck.id if deck is not None else None,
                 "pile": pile,
                 "deck_json": deck.return_json() if deck is not None else None,
+                # the mw_character the card went under, None when it did not;
+                # character_json is that character after the release
+                "character_id": character.id if character is not None else None,
+                "character_json": character.return_json() if character is not None else None,
                 # the nickname of the player whose private hand took the token,
                 # None when it did not go to a hand
                 "hand_of": receiver if to_hand else None,
@@ -936,6 +957,12 @@ def pick(self, logger, message):
         return
 
     component_id = message["component_id"]
+    request_id = message.get("request_id")
+    # an mw_character gives back the last card put under it
+    if component.kind == 'mw_character':
+        pick_from_character(self, user, component, message, request_id)
+        return
+
     if component.kind != 'bag':
         self.send_error(
             "component_not_a_bag",
@@ -943,7 +970,6 @@ def pick(self, logger, message):
         )
         return
 
-    request_id = message.get("request_id")
     token = user.session.pick_from_bag(component, user, message.get("x"), message.get("y"))
     if token is None:
         if component.components:
@@ -968,6 +994,33 @@ def pick(self, logger, message):
         # each client must tell its own token from the other's
         "request_id": request_id if isinstance(request_id, str) else None,
         "component_json": token.return_json(),
+    })
+
+
+def pick_from_character(self, user, character, message, request_id):
+    """
+    Takes the last card put under an mw_character into the hand of the
+    player, under the pointer, as a pick from a bag does.
+    """
+    if not character.acquirable_by(user):
+        self.send_error(
+            "wrong_nationality",
+            f"Component {character.id} belongs to {character.nationality}"
+        )
+        return
+    card = user.session.take_from_character(character, user, message.get("x"), message.get("y"))
+    if card is None:
+        self.send_error("character_empty", f"No card lies under {character.id}")
+        return
+    user.session.send({
+        "event": "pick",
+        "nickname": user.name,
+        "component_id": character.id,
+        "user": user.id,
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "component_json": card.return_json(),
+        # the character without that card, so every screen updates its count
+        "character_json": character.return_json(),
     })
 
 
@@ -1075,6 +1128,14 @@ def shuffle(self, logger, message):
     if user is None:
         return
 
+    # a deck declaring "display_shuffle": false has no Shuffle button
+    if not deck.display_shuffle:
+        self.send_error(
+            "shuffle_disabled",
+            f"Deck {deck.id} cannot be shuffled"
+        )
+        return
+
     deck.shuffle(pile)
     user.session.send({
         "event": "shuffle",
@@ -1120,6 +1181,14 @@ def deal(self, logger, message):
         self.send_error(
             "component_not_a_stack",
             f"Component {stack.id} is not a stack"
+        )
+        return
+
+    # a stack deals only when the game declares "deal": true
+    if not stack.deal_enabled:
+        self.send_error(
+            "deal_disabled",
+            f"Stack {stack.id} does not deal"
         )
         return
 
@@ -1361,6 +1430,65 @@ def increment(self, logger, message):
 
 def decrement(self, logger, message):
     change_counter_value(self, logger, message, "decrement")
+
+
+# the columns of an mw_character a click may mark
+CHARACTER_COLUMNS = ("left", "right")
+
+
+def mark(self, logger, message):
+    """
+    Moves a box of an mw_character on to its next state: a slash, a cross, empty
+    again on the left column; a circle, empty again on the right one. The
+    server keeps the boxes and sends the new state to every screen.
+    """
+    logger.debug("Process mark message")
+    user, component, ready = resolve_component_action(
+        self, message, "mark", ["component_id", "column", "index"]
+    )
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    if not component.markable():
+        self.send_error(
+            "component_not_markable",
+            f"Component {component_id} has no box to mark"
+        )
+        return
+
+    # the same rules as a flip: the game must be on, and an mw_character of a
+    # nationality is only marked by its players
+    if refuse_modification(self, user, component):
+        return
+
+    # the columns are not shown on the back of the card
+    if component.side != "front":
+        self.send_error(
+            "character_face_down",
+            f"Component {component_id} shows its back"
+        )
+        return
+
+    column = message["column"]
+    index = message["index"]
+    value = component.mark(column, index) if column in CHARACTER_COLUMNS else None
+    if value is None:
+        self.send_error(
+            "unknown_box",
+            f"Component {component_id} has no box {index} in a {column} column"
+        )
+        return
+
+    user.session.send({
+        "event": "mark",
+        "component_id": component_id,
+        "column": column,
+        "index": index,
+        "value": value,
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
+    })
 
 
 def flip(self, logger, message):

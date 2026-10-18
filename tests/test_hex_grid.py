@@ -184,6 +184,20 @@ class TestHexGrid:
         assert grid.snap(20, 5) is None
 
 
+    def test_area_limits_the_snap(self):
+        grid = HexGrid("flat", 0, 0, 40, area=(-10, -10, 100, 50))
+        assert grid.snap(5, 5) == pytest.approx((0, 0))
+        # the edges of the area still snap
+        assert grid.snap(90, 40) is not None
+        # outside it, even right next to a hex center, nothing snaps
+        assert grid.snap(0, -11) is None
+        assert grid.snap(91, 0) is None
+        assert grid.snap(60, 41) is None
+
+    def test_without_area_the_whole_board_snaps(self):
+        assert HexGrid("flat", 0, 0, 40).in_area(-1e6, 1e6) is True
+
+
 class TestReadGrid:
     def test_a_well_written_grid_is_read(self):
         grid = HexGrid.from_json(dict(GRID, size_y=42, snap_radius=25))
@@ -206,17 +220,28 @@ class TestReadGrid:
         dict(GRID, size=True),
         dict(GRID, size=float("nan")),
         dict(GRID, size_y=0),
+        dict(GRID, area="all"),
+        dict(GRID, area={"x": 0, "y": 0, "width": 100}),
+        dict(GRID, area={"x": 0, "y": 0, "width": 0, "height": 100}),
+        dict(GRID, area={"x": 0, "y": "0", "width": 100, "height": 100}),
         {k: v for k, v in GRID.items() if k != "origin_x"},
     ])
     def test_a_malformed_grid_is_no_grid(self, raw):
         """A game_json is written by hand: a wrong grid must not break the game."""
         assert HexGrid.from_json(raw) is None
 
+    def test_an_area_is_read(self):
+        grid = HexGrid.from_json(dict(GRID, area={"x": 10, "y": 20, "width": 300, "height": 400}))
+        assert grid.area == (10, 20, 300, 400)
+
+    def test_a_null_area_means_the_whole_board(self):
+        assert HexGrid.from_json(dict(GRID, area=None)).area is None
+
     def test_a_null_radius_means_no_limit(self):
         assert HexGrid.from_json(dict(GRID, snap_radius=0)).snap_radius is None
 
     def test_the_grid_survives_its_json(self):
-        raw = dict(GRID, size_y=42, snap_radius=25)
+        raw = dict(GRID, size_y=42, snap_radius=25, area={"x": 10, "y": 20, "width": 300, "height": 400})
         assert HexGrid.from_json(HexGrid.from_json(raw).return_json()).return_json() == raw
 
     def test_optional_fields_are_not_written_when_absent(self):
@@ -313,6 +338,14 @@ class TestRelease:
         board = dict(BOARD_JSON, grid=dict(GRID, snap_radius=5))
         token = release_at(1053 - 15 + 20, 2064 - 15, board_json=board)
         assert (token.x, token.y) == (1053 - 15 + 20, 2064 - 15)
+
+    def test_a_token_dropped_outside_the_area_stays_put(self):
+        # the area covers the left half of the map only (board-relative)
+        board = dict(BOARD_JSON, grid=dict(GRID, area={"x": 0, "y": 0, "width": 400, "height": 600}))
+        token = release_at(1053 - 15, 2064 - 15, board_json=board)
+        assert center(token) == pytest.approx((1050, 2060))
+        token = release_at(1500 - 15, 2064 - 15, board_json=board)
+        assert (token.x, token.y) == (1500 - 15, 2064 - 15)
 
     def test_the_topmost_board_decides(self):
         """A board drawn over the map, without grid, hides the map's grid."""

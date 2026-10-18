@@ -109,12 +109,12 @@ leur attache un errback de journalisation.
 | `close_session` | `session_closed` puis `session_players_changed` | session, puis lobby |
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
-| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`) | session |
+| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`), `deck_id`/`pile`/`deck_json`, `character_id`/`character_json` (le `mw_character` sous lequel la carte est passée) | session |
 | `voice_join` | `voice_joined` `{peers, ice_servers}` à l'appelant, puis `voice_members` `{members}` | appelant, puis session |
 | `voice_leave` | `voice_members` `{members}` | session |
 | `voice_signal` `{to, data}` | `voice_signal` `{from, data}` | le seul destinataire |
 | `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
-| `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` | session |
+| `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` ; sur un `mw_character`, aussi `character_json` | session |
 | `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
 | `shuffle` `{component_id, pile?}` | `shuffle` `{component_id, pile, user, nickname, deck_json}` | session |
 | `refill` `{component_id}` | `refill` `{component_id, user, nickname, deck_json}` | session |
@@ -127,6 +127,7 @@ leur attache un errback de journalisation.
 | `rotate` | `rotate` `{orientation}` | session |
 | `flip` | `flip` `{side, front_src, back_src}` | session |
 | `increment` / `decrement` | `counter_value` `{value}` | session |
+| `mark` `{component_id, column, index}` | `mark` `{component_id, column, index, value, nickname}` | session |
 | `fix_positions` | `fix_positions` `{components}` | session |
 | `order_players` `{nicknames}` (owner seulement) | `session_status` | session |
 | `apply_setup` | `setup` `{components}` | session |
@@ -180,7 +181,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que dix `kind` :
+`Session.load_session_components` ne reconnaît que onze `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
@@ -194,6 +195,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 | `deck` | `Deck` | `fixed` | paquet de cartes `single` ou `duo` (voir § Paquet de cartes) ; uniquement s'il est déclaré dans `fixed` |
 | `stack` | `Stack` | `fixed` | sous-classe de `Deck` à une seule pile, qui distribue (voir § Pile qui distribue) ; uniquement s'il est déclaré dans `fixed` |
 | `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck` / `stack`) |
+| `mw_character` | `MwCharacter` | `fixed` | carte immobile à deux colonnes de cases (voir § Personnage) ; uniquement s'il est déclaré dans `fixed` |
 
 Un `kind` inconnu est ignoré sans erreur.
 
@@ -427,7 +429,8 @@ Raffaillac). Un `board` n'a plus de clé `magnetism` (ni lue, ni sauvegardée) :
 
 ```json
 "grid": {"type": "hex", "orientation": "flat", "origin_x": 112.5,
-         "origin_y": 98.0, "size": 64.3, "size_y": 63.8, "snap_radius": 40}
+         "origin_y": 98.0, "size": 64.3, "size_y": 63.8, "snap_radius": 40,
+         "area": {"x": 79, "y": 304, "width": 2186, "height": 2618}}
 ```
 
 - Coordonnées **relatives au coin haut-gauche du plateau**, en unités du
@@ -439,6 +442,13 @@ Raffaillac). Un `board` n'a plus de clé `magnetism` (ni lue, ni sauvegardée) :
   `Session.snap_to_grid` depuis le handler `release`. Seul compte le plateau
   **le plus haut** sous le centre du pion ; s'il n'a pas de grille, pas
   d'aimantage. Seuls les `token` sont aimantés.
+- `area` (facultatif, défaut : tout le plateau) est le rectangle du plateau où
+  les hexagones sont imprimés, relatif à son coin haut-gauche. Un pion dont le
+  centre est lâché en dehors n'est pas aimanté (`HexGrid.in_area`, testé avant
+  `snap_radius`), et Raffaillac ne dessine la grille de calibrage que pour les
+  hexagones centrés dedans. Une `area` mal écrite (largeur ou hauteur ≤ 0,
+  champ manquant ou non numérique) fait ignorer **toute** la grille ; `null`
+  vaut absence.
 - Le retour sur la case de départ (`near_initial_position`) **prime** sur la
   grille.
 - Une grille mal écrite est ignorée (`None`), sans erreur.
@@ -697,7 +707,8 @@ et une défausse `discard`). Tout autre `type` vaut `single`.
   `x`/`y`, sur la face qu'elle avait dans la pile. Erreurs : `pile_empty`,
   `unknown_pile`, `component_not_a_deck`, `wrong_nationality`.
 - `draw` avec `count` (`Session.draw_cards_from_deck`) sort plusieurs cartes
-  du dessus, `DRAW_MAX` (10) au plus ; une valeur qui n'est pas un entier ≥ 1
+  du dessus, `DRAW_MAX` (10) au plus, ou plus si le paquet a un bouton de
+  pioche plus grand (`card_pickup_quantity`) ; une valeur qui n'est pas un entier ≥ 1
   vaut 1. Une pile trop courte donne ce qu'elle a. Le serveur envoie **un
   événement `draw` par carte**, avec le même `request_id`, `index` (0 à
   `count` − 1) et `count` (le nombre réellement sorti) ; `deck_json` y est
@@ -706,8 +717,36 @@ et une défausse `discard`). Tout autre `type` vaut `single`.
 - `shuffle` mélange une pile ; `refill` remet la défausse **sous** la pioche,
   face cachée, **sans mélanger**. `resolve_deck_action` est leur préambule
   commun (joueur, `acquire_refusal`, `deck`, pile connue).
+- `card_pickup_quantity` (facultatif, `deck` et `stack`) : les boutons de
+  pioche multiple que le client dessine sur chaque pile, un par entier.
+  `read_pickup_quantities` (`Components/deck.py`) la nettoie : absente ou ni
+  `false` ni liste → `[2, 5, 10]` (`DEFAULT_PICKUP_QUANTITIES`) ; `false` →
+  `[]`, aucun bouton ; une liste → ses entiers ≥ 1, sans doublon, dans l'ordre,
+  5 au plus (`PICKUP_QUANTITIES_MAX`), le reste ignoré sans erreur. La liste
+  nettoyée part dans `return_json` (donc dans la sauvegarde, où `[]` reste
+  `[]`).
+- `orientation` (facultatif, `deck` et `stack`) : angle des piles autour de
+  leur centre, 0, 90, 180 ou 270 (`read_deck_orientation` ; autre valeur → 0).
+  `x`/`y`/`width`/`height` restent ceux de la pile non tournée, comme pour un
+  pion ; `Deck.footprint(pile)` donne le rectangle couvert (largeur et hauteur
+  échangées pour un quart de tour), que lit `pile_at` pour le dépôt d'une
+  carte. Une carte piochée (deck ou stack, une ou plusieurs) sort **droite**,
+  `orientation` 0 (`draw_from_deck` → `Card.tap(0)`). Envoyée et sauvegardée par `return_json`.
+- **Rotation des cartes** : optionnelle, comme pour un pion. Seule une carte
+  déclarant `"orientable": true` tourne (absente ou `false` →
+  `component_not_rotatable`). `rotate` la tourne de 45° et diffuse
+  l'événement `rotate` à toute la session ; mêmes refus qu'un pion
+  (`refuse_modification`, `component_held`). L'angle et `orientable` sont
+  sauvegardés. Une carte qui entre dans une main privée repasse à
+  `orientation` 0 (`Session.enter_hand`, donc aussi `deal` et `give`) ; une
+  carte relâchée sur un deck ou un stack prend l'`orientation` de celui-ci
+  (`Session.put_in_deck`).
 - `acquire`, `flip`, `rotate` sur une carte d'un paquet : `component_in_deck`
   (`refuse_modification`).
+- `display_shuffle` (facultatif, `deck` et `stack`) : seul `false` masque
+  les boutons Shuffle (`Deck.display_shuffle`, envoyé et sauvegardé par
+  `return_json`) ; l'action `shuffle` répond alors `shuffle_disabled`.
+  `shuffle_at_startup` n'est pas concerné.
 - `shuffle_at_startup` (facultatif, `deck` et `stack`) : seul le booléen
   `true` fait mélanger la **pioche** à la construction du paquet
   (`Session.build_deck`), donc au lancement de la partie. La clé n'est
@@ -755,6 +794,13 @@ pile** (`draw`) : tout ce qui vaut pour un `deck` `single` vaut pour lui
   Une carte qui ne déclare pas sa taille prend celle de la zone.
 - `type`, `discard`, `discard_x/y` sont sans effet : pas de défausse, `refill`
   répond `unknown_pile`. Des cartes listées dans `discard` rejoignent la pile.
+- `deal` (facultatif, booléen) : seul `true` fait distribuer le stack
+  (`Stack.deal_enabled`, envoyé et sauvegardé sous `deal` par
+  `return_json`) ; absent ou `false`, pas de bouton Deal et l'action `deal`
+  répond `deal_disabled`. Le bot Sherlock (`is_stack`) ne distribue que par
+  un stack qui le déclare, sinon il pioche.
+- `text` (deck et stack) : légende ; absente, `null`, vide ou non textuelle,
+  elle vaut `None` (`null` envoyé) et rien n'est écrit.
 - `deal` (`Session.deal_from_stack`) donne **une carte à chaque joueur**, du
   dessus vers le dessous, dans l'ordre des sièges (`Session.dealt_players` :
   `player_names`, puis les joueurs à la table sans siège connu). Les cartes
@@ -762,13 +808,52 @@ pile** (`draw`) : tout ce qui vaut pour un `deck` `single` vaut pour lui
   pour leur détenteur seul (`enter_hand`).
   C'est tout ou rien : sans une carte par joueur, rien ne bouge.
 - Erreurs de `deal` : celles de `resolve_deck_action`, puis
-  `component_not_a_stack`, `private_hand_disabled`
+  `component_not_a_stack`, `deal_disabled`, `private_hand_disabled`
   (`options.private_hand` n'est pas un objet), `not_enough_cards`.
 - L'événement `deal` n'est **pas** envoyé par `Session.send` : chaque
   destinataire reçoit son propre `cards` (la carte qu'il a reçue, avec sa
   face ; liste vide pour un spectateur), passé par `for_user`. Les cartes des
   autres ne partent pas, pas même leur `id`.
 - `deal` ne regarde pas la nationalité d'une carte.
+
+## Personnage (`mw_character`)
+
+`Components/mw_character.py`, tests `tests/test_mw_character.py`. Une carte
+**immobile** de `fixed` (`acquire` répond `success: false`), avec une colonne de
+cases de chaque côté : `left` et `right`, chacune `{icon, boxes}`.
+- `boxes` est ramené entre 3 et 6 ; une colonne absente, qui n'est pas un objet
+  ou sans `boxes` numérique est omise (`read_column`). `icon` n'est qu'une
+  image : jamais cliquée.
+- `mark {component_id, column, index}` fait avancer une case
+  (`MwCharacter.mark`) : à gauche (points de vie) 0 vide → 1 barre → 2 croix →
+  0, à droite (fatigue de l'anneau) 0 vide → 1 rond → 0
+  (`CHARACTER_COLUMN_STATES`). Diffusé à toute la session.
+- Erreurs de `mark` : celles de `resolve_component_action`,
+  `component_not_markable` (pas un `mw_character`, `Component.markable`), celles
+  de `refuse_modification` (partie non lancée, joueur absent,
+  `wrong_nationality`), `character_face_down` (dos visible : les colonnes n'y
+  sont pas), `unknown_box` (colonne ou indice inconnu, indice non entier).
+- Retourné par l'action `flip` existante (double clic) s'il a un `back_src` ;
+  mêmes refus. `nationality` : seuls les joueurs de ce camp le cochent et le
+  retournent (`acquirable_by`) ; sans, n'importe quel joueur. Ce n'est pas un
+  `Token` : ses faces ne sont jamais masquées par `for_user`.
+- `return_json` envoie et sauvegarde `side` et chaque colonne
+  `{icon, boxes, marks}` ; `read_marks` relit des `marks` sauvegardées (valeur
+  invalide → 0).
+- **Conteneur de cartes** (`MwCharacter.cards`, la dernière posée en fin de
+  liste) : une `Card` relâchée avec son centre sur le personnage
+  (`Session.character_at`, après le sac et le paquet, et seulement si le
+  joueur peut le toucher : nationalité) passe dessous
+  (`put_under_character`) : elle quitte `movable`, perd sa position, passe
+  face visible et droite. Tout le monde lit ses faces : `return_json` envoie
+  `cards` (les `return_json` des cartes), sauvegardées et relues au
+  chargement (`build_card` avec le personnage comme gabarit : taille et dos
+  par défaut ; ids comptés par `duplicate_component_ids`).
+- `pick` sur un `mw_character` (`pick_from_character`) rend la **dernière**
+  carte posée, dans la main du joueur sous le pointeur
+  (`take_from_character`) ; erreurs `wrong_nationality`, `character_empty`.
+  Une carte sous un personnage est hors d'atteinte : `refuse_modification` →
+  `component_under_character`, et un randomizer `id_list` l'ignore.
 
 ## Joueurs simulés (`bots/`, `sherlock_bot.py`)
 
@@ -821,7 +906,8 @@ python3 sherlock_bot.py --code ABCD1234 --bots 2  # bots rejoignant des humains
 
 ## `game_json` et `setup`
 
-- `setup` est une liste de `{component_id, x?, y?, side?}` décrivant
+- `setup` est une liste de `{component_id, x?, y?, side?}` (et de
+  `randomizer`, ci-dessous) décrivant
   l'installation initiale du plateau.
 - Les coordonnées sont **absolues**, pas des deltas, et l'application est
   **idempotente** : réappliquer le même setup ne déplace rien deux fois.
@@ -831,6 +917,35 @@ python3 sherlock_bot.py --code ABCD1234 --bots 2  # bots rejoignant des humains
   via `pending_setup`, puis consommé logiquement (la session ne le rejoue pas).
 - Un pion déplacé par le setup adopte cette case comme **case d'origine**
   (`fix_position`).
+- **`randomizer`** : une entrée `{kind: "randomizer", source_kind,
+  source_id, targets}` du setup pose au hasard un composant sur chaque
+  position de `targets` (`{x, y, side?, orientation?}`, `x`/`y` requis).
+  `source_kind` : `bag`, `deck` ou `stack` (le conteneur `source_id`, qui doit
+  être de ce kind ; pioche seulement pour un paquet), ou `id_list`
+  (`source_id` est une liste d'id ; seuls les `Token`/`Card` connus et hors
+  main comptent). `read_randomizer` le nettoie (mal écrit = ignoré).
+  `Session.resolve_randomizers` tire **à la construction de la session**,
+  après `load_session_components`, et remplace chaque randomizer par des
+  entrées ordinaires `{component_id, x, y, side?, orientation?}` : tous les
+  joueurs appliquent le même tirage et `_pending_sides` voit les faces. Un
+  composant n'est tiré qu'une fois, tous randomizers confondus ; une source
+  trop petite ne remplit que les premières positions. Les composants tirés
+  sont notés dans `setup_take_out` : `apply_setup` les sort de leur conteneur
+  (`take_out_for_setup`, vers `movable`), leur donne leur case de départ,
+  applique `orientation` (`Token.tap`), et ajoute à l'événement `setup` le
+  `return_json` de chaque sac ou paquet vidé. `game_json_state` garde le
+  `setup` brut tant qu'il n'est pas appliqué : une session reconstruite avant
+  tire à nouveau. `anonymize_ids` renomme aussi les id d'une `id_list`.
+  Une cible peut aussi être un **conteneur** : `{container_id, pile?}`
+  (`pile` : `draw` par défaut, ou `discard`), un deck ou un stack. Seule une
+  `Card` y va (le tirage saute les autres) ; un conteneur inconnu, qui n'est
+  pas un paquet ou sans cette pile, fait sauter la cible
+  (`Session.container_target`). L'entrée résolue est
+  `{component_id, container_id, pile}` ; `apply_setup` fait alors comme un
+  relâcher sur la pile (`put_in_deck` : face de la pile, `orientation` du
+  paquet), sauf si la carte y est déjà (setup rejoué), et envoie la carte sans
+  position puis le paquet.
+  Tests : `tests/test_randomizer.py`.
 - Rappel : `Variant.game_json` remplace le JSON de base côté Chabanas, donc un
   `setup` défini au seul niveau du jeu n'est pas hérité par les variantes.
 

@@ -18,6 +18,8 @@ def card_json(name, **fields):
 ACE, KING, QUEEN = card_json("ace"), card_json("king"), card_json("queen")
 STACK = {"kind": "stack", "id": "stack", "x": 100, "y": 100, "width": 200, "height": 300,
          "back_src": "/back.png", "components": [ACE, KING, QUEEN]}
+# a stack showing the Deal button
+DEALER = dict(STACK, deal=True)
 JOKER = card_json("joker", x=500, y=500, back_src="/back.png")
 ARMY = {"kind": "token", "id": "army", "x": 700, "y": 700, "width": 40, "height": 40,
         "front_src": "/army.png", "back_src": None}
@@ -132,8 +134,23 @@ class TestCards:
 
 
 class TestDeal:
+    def test_a_stack_deals_only_when_the_game_says_true(self):
+        for value in (None, False, "true", 1):
+            stack = dict(STACK) if value is None else dict(STACK, deal=value)
+            session = build_session(stack)
+            assert session.get_component("stack").return_json()["deal"] is False
+            protocol, *_ = two_players(session)
+            call(deal, protocol, "stack")
+            assert error_codes(protocol) == ["deal_disabled"]
+            assert stack_ids(session) == ["ace", "king", "queen"]
+        assert build_session(DEALER).get_component("stack").return_json()["deal"] is True
+
+    def test_the_saved_state_keeps_it(self):
+        state = build_session(DEALER).game_json_state()
+        assert state["fixed"][0]["deal"] is True
+
     def test_each_player_gets_one_card_from_the_top(self):
-        session = build_session()
+        session = build_session(DEALER)
         protocol, alice, _, bob = two_players(session)
         call(deal, protocol, "stack")
         assert hand_ids(session, "alice") == ["queen"]
@@ -147,14 +164,14 @@ class TestDeal:
         assert bob.sent[-1]["event"] == "deal"
 
     def test_the_dealt_cards_lie_face_up_in_the_hands(self):
-        session = build_session()
+        session = build_session(DEALER)
         protocol, alice, _, _ = two_players(session)
         call(deal, protocol, "stack")
         assert session.get_component("queen").side == "front"
         assert alice.sent[-1]["cards"][0]["side"] == "front"
 
     def test_a_player_only_reads_its_own_card(self):
-        session = build_session()
+        session = build_session(DEALER)
         protocol, alice, _, bob = two_players(session)
         watcher = FakeUser("carol", role="watcher", session=session)
         session.watchers = [watcher]
@@ -165,7 +182,7 @@ class TestDeal:
         assert "king" not in str(alice.sent[-1])
 
     def test_the_seats_are_dealt_in_order(self):
-        session = build_session()
+        session = build_session(DEALER)
         session.player_names = ["bob", "alice"]
         protocol, _, _, _ = two_players(session)
         call(deal, protocol, "stack")
@@ -173,7 +190,7 @@ class TestDeal:
         assert hand_ids(session, "alice") == ["king"]
 
     def test_nothing_is_dealt_without_a_card_for_everybody(self):
-        session = build_session(dict(STACK, components=[ACE]))
+        session = build_session(dict(DEALER, components=[ACE]))
         protocol, alice, _, _ = two_players(session)
         call(deal, protocol, "stack")
         assert error_codes(protocol) == ["not_enough_cards"]
@@ -182,27 +199,27 @@ class TestDeal:
         assert alice.sent == []
 
     def test_no_deal_without_private_hands(self):
-        session = build_session(private_hand=None)
+        session = build_session(DEALER, private_hand=None)
         protocol, _, _, _ = two_players(session)
         call(deal, protocol, "stack")
         assert error_codes(protocol) == ["private_hand_disabled"]
         assert stack_ids(session) == ["ace", "king", "queen"]
 
     def test_a_deck_does_not_deal(self):
-        session = build_session(dict(STACK, kind="deck"))
+        session = build_session(dict(DEALER, kind="deck"))
         protocol, _, _, _ = two_players(session)
         call(deal, protocol, "stack")
         assert error_codes(protocol) == ["component_not_a_stack"]
 
     def test_no_deal_while_a_player_is_away(self):
-        session = build_session()
+        session = build_session(DEALER)
         session.player_names = ["alice", "bob", "carol"]
         protocol, _, _, _ = two_players(session)
         call(deal, protocol, "stack")
         assert error_codes(protocol) == ["players_missing"]
 
     def test_a_watcher_does_not_deal(self):
-        session = build_session()
+        session = build_session(DEALER)
         two_players(session)
         watcher = FakeUser("carol", role="watcher", session=session)
         session.watchers = [watcher]
@@ -211,7 +228,7 @@ class TestDeal:
         assert error_codes(protocol) == ["watcher_not_allowed"]
 
     def test_the_dealt_cards_are_saved_with_the_hands(self):
-        session = build_session()
+        session = build_session(DEALER)
         protocol, _, _, _ = two_players(session)
         call(deal, protocol, "stack")
         state = session.game_json_state()
@@ -261,3 +278,32 @@ class TestShuffleAtStartup:
     def test_the_clients_do_not_read_the_key(self):
         session = build_session(dict(STACK, shuffle_at_startup=True))
         assert "shuffle_at_startup" not in session.get_component("stack").return_json()
+
+
+class TestPickupQuantities:
+    def test_a_stack_reads_its_buttons_like_a_deck(self):
+        assert build_session().get_component("stack").return_json()["card_pickup_quantity"] == [2, 5, 10]
+        stack = build_session(dict(STACK, card_pickup_quantity=[1, 3])).get_component("stack")
+        assert stack.return_json()["card_pickup_quantity"] == [1, 3]
+        stack = build_session(dict(STACK, card_pickup_quantity=False)).get_component("stack")
+        assert stack.return_json()["card_pickup_quantity"] == []
+
+
+class TestOrientation:
+    def test_a_stack_reads_its_orientation_like_a_deck(self):
+        stack = build_session(dict(STACK, orientation=90)).get_component("stack")
+        assert stack.return_json()["orientation"] == 90
+        assert stack.footprint("draw") == (50, 150, 300, 200)
+
+
+class TestText:
+    def test_a_null_text_is_no_caption(self):
+        assert build_session(dict(STACK, text=None)).get_component("stack").return_json()["text"] is None
+        assert build_session(dict(STACK, text="Donne")).get_component("stack").return_json()["text"] == "Donne"
+
+
+class TestDisplayShuffle:
+    def test_false_hides_the_shuffle_of_a_stack(self):
+        session = build_session(dict(STACK, display_shuffle=False))
+        assert session.get_component("stack").return_json()["display_shuffle"] is False
+        assert build_session().get_component("stack").return_json()["display_shuffle"] is True

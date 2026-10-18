@@ -274,8 +274,10 @@ class TableClient:
         return card_name((self.pile(deck_id, pile).get("top") or {}).get("src"))
 
     def is_stack(self, deck_id: str) -> bool:
-        """Whether a deck is a stack, which deals its cards to the hands."""
-        return (self.decks.get(deck_id) or {}).get("kind") == "stack"
+        """Whether a deck is a stack that deals its cards to the hands: a stack
+        without "deal": true has no Deal action, and is drawn from instead."""
+        deck = self.decks.get(deck_id) or {}
+        return deck.get("kind") == "stack" and deck.get("deal") is True
 
     def private_hand(self) -> dict | None:
         """The private_hand option of the game: an object when the hands exist."""

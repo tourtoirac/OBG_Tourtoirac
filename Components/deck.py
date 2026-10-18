@@ -20,6 +20,44 @@ PILE_SIDES = {
     'discard': 'front',
 }
 
+# card_pickup_quantity: the numbers of cards the multi-draw buttons of a pile
+# take, one button each. Absent, the game gets these buttons; false, none.
+DEFAULT_PICKUP_QUANTITIES = (2, 5, 10)
+PICKUP_QUANTITIES_MAX = 5
+
+
+def read_deck_orientation(value) -> int:
+    """
+    Reads the "orientation" key of a deck or a stack: the angle, in degrees,
+    its piles are turned by, around their center.
+    :return: 0, 90, 180 or 270; 0 for anything that is not a number or not a
+        quarter turn
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0
+    angle = int(value) % 360
+    return angle if angle % 90 == 0 else 0
+
+
+def read_pickup_quantities(value) -> list:
+    """
+    Reads the "card_pickup_quantity" key of a deck or a stack.
+    :param value: absent (None), false, or a list of whole numbers
+    :return: the quantities of the buttons, in the order of the game_json:
+        the default ones when the key is absent or neither false nor a list,
+        none for false. From a list, only the whole numbers above zero are
+        kept, without duplicates, PICKUP_QUANTITIES_MAX at most.
+    """
+    if value is False:
+        return []
+    if not isinstance(value, list):
+        return list(DEFAULT_PICKUP_QUANTITIES)
+    quantities = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 1 and item not in quantities:
+            quantities.append(item)
+    return quantities[:PICKUP_QUANTITIES_MAX]
+
 
 class Deck(Component):
     """
@@ -32,7 +70,8 @@ class Deck(Component):
     it is drawn. In each pile the last card of the list is the one on top.
     """
     def __init__(self, component_id, x, y, width, height, deck_type='single', back_src=None,
-                 draw=None, discard=None, text=None, discard_x=None, discard_y=None):
+                 draw=None, discard=None, text=None, discard_x=None, discard_y=None,
+                 card_pickup_quantity=None, orientation=None, display_shuffle=None):
         super().__init__(component_id)
         self.kind = 'deck'
         # type: anything but "duo" is a single pile
@@ -46,13 +85,22 @@ class Deck(Component):
         # back_src: the back the game gives the cards of this deck; a card
         # declaring its own keeps it
         self.back_src = back_src
-        # text: optional caption the client writes above the deck; the server
-        # only carries it
-        self.text = text
+        # text: optional caption the client writes above the deck. Absent,
+        # null, empty or not a text, there is none: null is sent
+        self.text = text if isinstance(text, str) and text != '' else None
         # where the discard pile lies; next to the draw pile when the game
         # does not say
         self.discard_x = discard_x if discard_x is not None else x + width + DECK_GAP
         self.discard_y = discard_y if discard_y is not None else y
+        # the multi-draw buttons the client shows on each pile
+        self.card_pickup_quantity = read_pickup_quantities(card_pickup_quantity)
+        # orientation: the piles are turned around their center; x, y,
+        # width and height stay those of the pile before it is turned, like
+        # for a token. A card drawn comes out turned the same way.
+        self.orientation = read_deck_orientation(orientation)
+        # display_shuffle: only false hides the Shuffle buttons, and the
+        # piles can then no longer be shuffled by the players
+        self.display_shuffle = display_shuffle is not False
         self.piles = {pile: [] for pile in DECK_PILES[self.type]}
         for card in draw or []:
             self.add('draw', card)
@@ -73,10 +121,24 @@ class Deck(Component):
         The pile of this deck the point (x, y) lies on, or None.
         """
         for pile in self.piles:
-            pile_x, pile_y = self.pile_position(pile)
-            if pile_x <= x <= pile_x + self.width and pile_y <= y <= pile_y + self.height:
+            left, top, width, height = self.footprint(pile)
+            if left <= x <= left + width and top <= y <= top + height:
                 return pile
         return None
+
+    def footprint(self, pile: str) -> tuple:
+        """
+        The rectangle a pile covers on the table once turned by orientation:
+        a quarter turn swaps its width and height around the same center.
+        :return: (x, y, width, height)
+        """
+        pile_x, pile_y = self.pile_position(pile)
+        width, height = self.width, self.height
+        if self.orientation in (90, 270):
+            width, height = height, width
+        center_x = pile_x + self.width / 2
+        center_y = pile_y + self.height / 2
+        return center_x - width / 2, center_y - height / 2, width, height
 
     def pile_holding(self, card) -> str | None:
         """
@@ -191,6 +253,9 @@ class Deck(Component):
             "text": self.text,
             "discard_x": self.discard_x,
             "discard_y": self.discard_y,
+            "card_pickup_quantity": list(self.card_pickup_quantity),
+            "orientation": self.orientation,
+            "display_shuffle": self.display_shuffle,
             "piles": {pile: self.pile_json(pile) for pile in self.piles},
         }
 
