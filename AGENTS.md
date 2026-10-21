@@ -54,7 +54,7 @@ ni réseau ni service externe ne sont requis.
 | `main.py`              | `GameWebSocketProtocol`, dispatch, démarrage (`main`, `start_server`) |
 | `handle_message.py`    | Dispatch : un handler par action |
 | `session.py`           | **Cœur** : état de la partie, composants, diffusion |
-| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `dice_pool`, `stack`, `token`, `component`, `hex_grid` |
+| `Components/`          | `board`, `board_group`, `bag`, `card`, `counter`, `deck`, `dice`, `dice_pool`, `slot`, `stack`, `token`, `component`, `hex_grid` |
 | `chabanas.py`          | Client HTTP vers le back-end, via `IBodyProducer` |
 | `lobby.py` `user.py`   | Lobby et utilisateur connecté |
 | `player_sim.py`        | Simulateur de joueur, pour essai manuel |
@@ -131,6 +131,9 @@ leur attache un errback de journalisation.
 | `mark` `{component_id, column, index}` | `mark` `{component_id, column, index, value, nickname}` | session |
 | `fix_positions` | `fix_positions` `{components}` | session |
 | `order_players` `{nicknames}` (owner seulement) | `session_status` | session |
+| `view` `{x, y}` (joueur seulement) | `view` `{nickname, x, y}` | ceux qui suivent ce joueur |
+| `follow` `{nickname \| null}` | `view` (dernière vue connue de ce joueur) | émetteur |
+| (`follow`, départ d'un suiveur) | `followed` `{followed, followers}` | le joueur qui commence ou cesse d'être suivi |
 | `apply_setup` | `setup` `{components}` | session |
 | (arrêt du réacteur) | `server_shutdown` | tous |
 
@@ -182,19 +185,20 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que onze `kind` :
+`Session.load_session_components` ne reconnaît que douze `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
 | `board` | `Board` | `fixed` | |
 | `board_group` | `BoardGroup` | `fixed` | 1 à n `board` retournés ensemble (voir § Groupe de plateaux) |
-| `counter` | `Counter` | `fixed` | compteur numérique ± (`min`/`max`/`color`) |
+| `counter` | `Counter` | `fixed` | compteur numérique ± (`min`/`max`/`color`, libellé `text` sur 2 lignes au plus, cadre `border`/`border_width`) |
 | `dice` | `Dice` | `dice` | accepté dans les trois listes ; `origin_list` mémorise d'où il vient pour la sauvegarde |
 | `dice_pool` | `DicePool` | `fixed` | 1 à n `dice` lancés ensemble (voir § Groupe de dés) ; uniquement s'il est déclaré dans `fixed` |
 | `bag` | `Bag` | `fixed` | sac de pions tirés au hasard (voir § Sac) ; uniquement s'il est déclaré dans `fixed` |
 | `token` | `Token` | `movable` | uniquement s'il est déclaré dans `movable` (ou dans un `bag`) |
 | `deck` | `Deck` | `fixed` | paquet de cartes `single` ou `duo` (voir § Paquet de cartes) ; uniquement s'il est déclaré dans `fixed` |
 | `stack` | `Stack` | `fixed` | sous-classe de `Deck` à une seule pile, qui distribue (voir § Pile qui distribue) ; uniquement s'il est déclaré dans `fixed` |
+| `slot` | `Slot` | `fixed` | sous-classe de `Deck` à une seule pile où les cartes gardent leur face (voir § Emplacement de cartes) ; uniquement s'il est déclaré dans `fixed` |
 | `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck` / `stack`) |
 | `mw_character` | `MwCharacter` | `fixed` | carte immobile à deux colonnes de cases (voir § Personnage) ; uniquement s'il est déclaré dans `fixed` |
 
@@ -220,7 +224,8 @@ Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
-`order_players`, `voice_join`, `voice_leave`, `voice_signal`, `chat_send`.
+`order_players`, `voice_join`, `voice_leave`, `voice_signal`, `chat_send`,
+`view`, `follow`.
 
 ## Configuration
 
@@ -359,6 +364,24 @@ joueurs de la partie, chacun une fois (`unknown_player`) ; ceux qui ne sont
 pas nommés gardent leur ordre, après les autres. Chabanas renvoie les sièges
 par ordre d'arrivée (`player_set.order_by('id')`).
 
+## Suivi de la vue d'un joueur (`view`, `follow`)
+
+Chaque joueur envoie `view` `{x, y}` : le centre de sa vue, en coordonnées
+monde logiques (non retournées). Le serveur le garde dans `Session.views`
+(par pseudo, jamais sauvegardé) et l'envoie aux seuls lecteurs dont
+`User.following` vaut ce pseudo. `follow` `{nickname}` choisit le joueur
+suivi (un autre joueur de la partie, à la table ou non, sinon
+`unknown_player`) et renvoie aussitôt sa dernière vue connue ; `{nickname:
+null}` arrête le suivi. Le changement passe par `Session.set_following` :
+le joueur qui commence ou cesse d'être suivi reçoit `followed`
+`{followed, followers}`, et la `Session` qu'il reçoit porte `followers` ; il n'envoie
+`view` que pendant qu'il est suivi. Un suiveur qui quitte la session
+(`remove_user`) cesse de suivre. Deux lecteurs ne se suivent pas l'un
+l'autre : suivre un joueur qui nous suit est refusé (`follows_you`). Un spectateur suit, mais sa vue est ignorée. `view`
+n'est pas journalisé (comme `move`) ; des coordonnées non finies donnent
+`invalid_view`. `User.following` appartient à la connexion : le client le
+renvoie après une reconnexion.
+
 ## Documents (`documents`)
 
 Clé **facultative, à la racine** du `game_json` (pas dans `options`) :
@@ -367,6 +390,19 @@ consultent depuis la page de jeu. `session.read_documents` nettoie la liste
 (entrée sans `src` écartée, `name` absent remplacé par le `src`),
 `return_session_json` la renvoie dans `documents`, et `game_json_state` la
 conserve puisqu'elle reste dans le `game_json`.
+
+## Icônes des joueurs (`player_icons`)
+
+Clé **facultative, à la racine** du `game_json` : `"player_icons": ["src",
+...]`, des images affichées avant le pseudo des joueurs.
+`session.read_player_icons` garde les textes non vides, sans doublon. Un
+joueur reçoit une image au hasard, parmi celles que personne n'a, quand il
+s'assoit pour la première fois (`Session.add_user` → `give_player_icon`) ; il
+la garde ensuite, même absent. Plus d'image libre : il n'en a pas.
+`participants()` porte `icon` (le `src`, ou `None`, toujours `None` pour un
+spectateur). `game_json_state` sauvegarde l'attribution dans
+`player_icon_of` (par pseudo), relue à la construction si l'image est encore
+dans `player_icons`.
 
 ## Ids anonymes (`options.anonymous_id`)
 
@@ -749,6 +785,12 @@ et une défausse `discard`). Tout autre `type` vaut `single`.
   5 au plus (`PICKUP_QUANTITIES_MAX`), le reste ignoré sans erreur. La liste
   nettoyée part dans `return_json` (donc dans la sauvegarde, où `[]` reste
   `[]`).
+- `card_pickup_piles` (facultatif, `deck`) : les piles qui montrent ces
+  boutons. `read_pickup_piles` (`Components/deck.py`) garde, dans l'ordre du
+  paquet, les piles du paquet que la liste nomme (`"draw"`, `"discard"`,
+  autres noms ignorés) ; absente ou pas une liste → toutes les piles. Envoyée
+  et sauvegardée par `return_json`. Purement d'affichage : `draw` avec
+  `count` reste accepté sur toute pile.
 - `orientation` (facultatif, `deck` et `stack`) : angle des piles autour de
   leur centre, 0, 90, 180 ou 270 (`read_deck_orientation` ; autre valeur → 0).
   `x`/`y`/`width`/`height` restent ceux de la pile non tournée, comme pour un
@@ -839,6 +881,38 @@ pile** (`draw`) : tout ce qui vaut pour un `deck` `single` vaut pour lui
   face ; liste vide pour un spectateur), passé par `for_user`. Les cartes des
   autres ne partent pas, pas même leur `id`.
 - `deal` ne regarde pas la nationalité d'une carte.
+
+## Emplacement de cartes (`slot`)
+
+Un `slot` (`Components/slot.py`, tests `tests/test_slot.py`) est une
+sous-classe de `Deck` à **une seule pile** (`draw`), dessinée comme un `stack`
+par le client : `width`/`height` sont ceux de la zone, et la carte du dessus y
+est centrée à sa propre taille. C'est tout son « magnétisme » : une carte
+relâchée avec son centre dans la zone y entre (`deck_at` → `put_in_deck`).
+
+```json
+{"kind": "slot", "id": "magic_01", "x": 100, "y": 100, "width": 120, "height": 180,
+ "text": "Magie", "components": []}
+```
+
+- **Une carte garde sa face** : `Slot.add` ne la retourne pas, à l'entrée
+  comme au chargement (les cartes déclarées gardent leur `side`).
+  `pile_json` montre la face sur laquelle la carte du dessus est posée
+  (`image_src[side]`), pas celle de la pile. Une carte face cachée y reste
+  cachée à tous (`sees_hidden_face`).
+- Comme un deck : immobile, cartes seulement, `orientation` du slot à
+  l'entrée, sortie par `draw` **droite** (`orientation` 0) sur sa face,
+  cartes gardées sur le serveur, `deck_json` dans les événements,
+  `component_in_deck`.
+- **Aucun bouton** : `card_pickup_quantity` vaut toujours `[]` et
+  `display_shuffle` toujours `false`, quoi que déclare le jeu. `shuffle`
+  répond `shuffle_disabled`, `deal` `component_not_a_stack`, `refill`
+  `unknown_pile` ; `shuffle_at_startup` est sans effet (`Slot.shuffle`
+  renvoie `False`).
+- **Cible de randomizer** : `{container_id: "<slot>"}` (pile `draw`), comme
+  un deck ou un stack ; la carte tirée y entre sur la face qu'elle avait.
+  Un slot n'est pas une **source** de randomizer
+  (`RANDOMIZER_CONTAINER_KINDS`).
 
 ## Personnage (`mw_character`)
 
@@ -961,7 +1035,7 @@ python3 sherlock_bot.py --code ABCD1234 --bots 2  # bots rejoignant des humains
   `setup` brut tant qu'il n'est pas appliqué : une session reconstruite avant
   tire à nouveau. `anonymize_ids` renomme aussi les id d'une `id_list`.
   Une cible peut aussi être un **conteneur** : `{container_id, pile?}`
-  (`pile` : `draw` par défaut, ou `discard`), un deck ou un stack. Seule une
+  (`pile` : `draw` par défaut, ou `discard`), un deck, un stack ou un slot. Seule une
   `Card` y va (le tirage saute les autres) ; un conteneur inconnu, qui n'est
   pas un paquet ou sans cette pile, fait sauter la cible
   (`Session.container_target`). L'entrée résolue est

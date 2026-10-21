@@ -11,6 +11,7 @@ from Components.mw_character import MwCharacter
 from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
+from Components.slot import Slot
 from Components.stack import Stack
 from Components.token import Token
 
@@ -52,8 +53,9 @@ DECK_CARD_LISTS = ('components', 'discard')
 DRAW_MAX = 10
 DRAW_FAN = 20
 
-# the kinds holding cards: a stack is a deck of one pile that deals its cards
-DECK_KINDS = ('deck', 'stack')
+# the kinds holding cards: a stack is a deck of one pile that deals its cards,
+# a slot a pile where the cards keep the side they are put down on
+DECK_KINDS = ('deck', 'stack', 'slot')
 
 
 def read_coordinate(value):
@@ -234,6 +236,23 @@ def read_nationalities(game_json) -> list:
         if isinstance(nationality, str) and nationality and nationality not in nationalities:
             nationalities.append(nationality)
     return nationalities
+
+
+def read_player_icons(game_json) -> list:
+    """
+    Reads the optional "player_icons" key of a game_json: the images shown
+    before the names of the players, one each.
+    :return: the sources of the images, without duplicates, in the order of
+        the game_json; anything but a non-empty text is left out
+    """
+    declared = game_json.get('player_icons') if isinstance(game_json, dict) else None
+    if not isinstance(declared, list):
+        return []
+    icons = []
+    for src in declared:
+        if isinstance(src, str) and src and src not in icons:
+            icons.append(src)
+    return icons
 
 
 def read_documents(game_json) -> list:
@@ -501,6 +520,16 @@ class Session:
         # documents: the PDF files the game lets the players consult. They
         # stay in the game_json, so the saved state keeps them.
         self.documents = read_documents(game_json)
+        # player_icons: the images shown before the names of the players. A
+        # player gets one at random, among those nobody has, the first time it
+        # sits at the table, and keeps it: saved with the state
+        # (player_icon_of), by nickname.
+        self.player_icons = read_player_icons(game_json)
+        saved_icons = game_json.get('player_icon_of')
+        self.player_icon_of = {
+            name: src for name, src in (saved_icons.items() if isinstance(saved_icons, dict) else [])
+            if isinstance(name, str) and src in self.player_icons
+        }
         # private hands: the tokens each player keeps off the table, by
         # nickname. The seat holds the hand, not the connection: it is still
         # there when the player comes back.
@@ -518,6 +547,9 @@ class Session:
         # the text chat: a general channel and a private one between each pair
         # of players. Saved with the state.
         self.chat = ChatHistory.from_json(game_json.get('chat'))
+        # the center of the view of each player, in world coordinates, by
+        # nickname: whoever follows that player is sent it. Never saved.
+        self.views = {}
         self.load_session_components()
         self.load_hands(game_json.get('hands'))
         # the components a randomizer of the setup lays on the table: when the
@@ -571,7 +603,13 @@ class Session:
                                 # ce cote ; presents, le serveur refuse de sortir de la
                                 # plage et le client grise le signe devenu impossible
                                 component.get('min'),
-                                component.get('max')
+                                component.get('max'),
+                                # text: optional label shown above the value
+                                component.get('text'),
+                                # border: optional frame, a color or true for the
+                                # color of the value; border_width its thickness
+                                component.get('border'),
+                                component.get('border_width')
                             )
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
@@ -586,7 +624,7 @@ class Session:
                             game_component = self.build_bag(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
-                        case 'deck' | 'stack' if list_name == 'fixed':
+                        case 'deck' | 'stack' | 'slot' if list_name == 'fixed':
                             game_component = self.build_deck(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
@@ -761,6 +799,20 @@ class Session:
         already built from it.
         :param piles: the cards of each list of DECK_CARD_LISTS
         """
+        if component.get('kind') == 'slot':
+            # a slot has one single pile, never shuffled: shuffle_at_startup
+            # does nothing to it
+            return Slot(
+                component['id'],
+                component['x'],
+                component['y'],
+                component['width'],
+                component['height'],
+                component.get('back_src'),
+                piles['components'] + piles['discard'],
+                component.get('text'),
+                component.get('orientation'),
+            )
         if component.get('kind') == 'stack':
             # a stack has one single pile: cards a description would list as
             # discarded go on top of the others
@@ -802,6 +854,8 @@ class Session:
             component.get('orientation'),
             # the Shuffle buttons: hidden only when the game says false
             component.get('display_shuffle'),
+            # the piles showing the multi-draw buttons: all of them by default
+            component.get('card_pickup_piles'),
         )
 
     def deck_holding(self, component) -> Deck | None:
@@ -1513,6 +1567,10 @@ class Session:
         state.pop('player_order', None)
         if self.player_order:
             state['player_order'] = list(self.player_order)
+        # the icon each player got survives the session too
+        state.pop('player_icon_of', None)
+        if self.player_icon_of:
+            state['player_icon_of'] = dict(self.player_icon_of)
         # the private hands are stored by nickname, and only when there are any
         state.pop('hands', None)
         if self.hands:
@@ -1689,6 +1747,8 @@ class Session:
         session_json["shows"] = self.shows_json(user)
         # chat: the messages the reader may read, oldest first
         session_json["chat"] = self.chat.readable_by(user.name if user is not None else None)
+        # followers: who follows the view of the reader
+        session_json["followers"] = self.followers(user.name) if user is not None else []
         if user is not None:
             session_json["components"] = self.for_user(session_json["components"], user)
             session_json["hand"] = self.for_user(session_json["hand"], user)
@@ -1753,8 +1813,9 @@ class Session:
         """
         Everybody attached to the game, for the list each screen shows: the
         seats first, connected or not, then the watchers.
-        :return: a list of {"nickname", "role", "connected"}; role is "player"
-            or "watcher", and a watcher is always connected
+        :return: a list of {"nickname", "role", "connected", "icon"}; role is
+            "player" or "watcher", and a watcher is always connected; icon is
+            the image of a player (player_icons), None for anybody without one
         """
         connected = [user.name for user in self.players]
         watching = [user.name for user in self.watchers]
@@ -1765,11 +1826,12 @@ class Session:
             # a closed game turned its players into watchers: they keep their
             # seat on the list as long as they stay
             present = name in connected or (self.closed and name in watching)
-            listed.append({"nickname": name, "role": "player", "connected": present})
+            listed.append({"nickname": name, "role": "player", "connected": present,
+                           "icon": self.player_icon_of.get(name)})
         for name in watching:
             if self.closed and name in seats:
                 continue
-            listed.append({"nickname": name, "role": "watcher", "connected": True})
+            listed.append({"nickname": name, "role": "watcher", "connected": True, "icon": None})
         return listed
 
     def acquire_refusal(self) -> str | None:
@@ -1842,6 +1904,7 @@ class Session:
                     return False, f"Session is full ({self.max_players} players)"
                 self.players.append(user)
                 user.role = 'player'
+                self.give_player_icon(user.name)
                 # the seat carries the nationality, not the connection
                 user.nationality = self.player_nationalities.get(user.name)
                 return True, None
@@ -1856,6 +1919,19 @@ class Session:
                 return True, None
             case _:
                 return False, f"Invalid role '{role}'"
+
+    def give_player_icon(self, nickname: str) -> None:
+        """
+        Gives a player, the first time it sits at the table, one of the
+        player_icons nobody has, at random. A player who has one keeps it;
+        when they are all taken, it gets none.
+        """
+        if nickname in self.player_icon_of:
+            return
+        taken = set(self.player_icon_of.values())
+        free = [src for src in self.player_icons if src not in taken]
+        if free:
+            self.player_icon_of[nickname] = random.choice(free)
 
     def find_user(self, name):
         """
@@ -1873,8 +1949,11 @@ class Session:
     def remove_user(self, user):
         """
         Removes a user from the session. A player leaving leaves the voice
-        channel too: the others are told.
+        channel too: the others are told. Whoever it followed is told when
+        nobody follows it any more.
         """
+        if user.following is not None:
+            self.set_following(user, None)
         if user in self.players:
             self.players.remove(user)
         elif user in self.watchers:
@@ -1950,6 +2029,71 @@ class Session:
                 if reader.name in (user.name, to):
                     reader.send(event)
         return message
+
+    def set_view(self, user, x: float, y: float) -> None:
+        """
+        Stores where a player looks and tells whoever follows it.
+        """
+        self.views[user.name] = (x, y)
+        event = self.view_json(user.name)
+        for reader in self.players + self.watchers:
+            if reader is not user and reader.following == user.name:
+                reader.send(event)
+
+    def view_json(self, nickname: str) -> dict | None:
+        """
+        The view event of a player, or None while it has not told its view.
+        """
+        view = self.views.get(nickname)
+        if view is None:
+            return None
+        return {"event": "view", "nickname": nickname, "x": view[0], "y": view[1]}
+
+    def followable(self, user, nickname) -> bool:
+        """
+        A reader follows the view of another player of the game, at the table
+        or not.
+        """
+        return isinstance(nickname, str) and nickname != user.name and nickname in self.ordered_seats()
+
+    def followers(self, nickname: str) -> list:
+        """
+        The nicknames of the readers who follow the view of that player. The
+        player only sends its view while there is one, and does not follow
+        them back.
+        """
+        return [reader.name for reader in self.players + self.watchers if reader.following == nickname]
+
+    def follows(self, follower: str, nickname: str) -> bool:
+        """
+        Does the reader named follower follow the view of nickname?
+        """
+        return follower in self.followers(nickname)
+
+    def set_following(self, user, nickname) -> None:
+        """
+        user follows the view of nickname, or nobody when it is None. A player
+        who starts or stops being followed is told so.
+        """
+        previous = user.following
+        if previous == nickname:
+            return
+        touched = [name for name in (previous, nickname) if name is not None]
+        before = {name: self.followers(name) for name in touched}
+        user.following = nickname
+        for name in touched:
+            if self.followers(name) != before[name]:
+                self.send_followed(name)
+
+    def send_followed(self, nickname: str) -> None:
+        """
+        Tells a player who follows its view.
+        """
+        followers = self.followers(nickname)
+        event = {"event": "followed", "followed": bool(followers), "followers": followers}
+        for player in self.players:
+            if player.name == nickname:
+                player.send(event)
 
     def send(self, message):
         # each user gets its own reading of the message: the hidden face of a
@@ -2073,9 +2217,9 @@ class Session:
 
     def container_target(self, target: dict) -> dict | None:
         """
-        A randomizer target naming a deck or a stack, with the pile the card
-        goes on: the draw pile when it names none.
-        :return: None when there is no such deck or stack, or no such pile
+        A randomizer target naming a deck, a stack or a slot, with the pile
+        the card goes on: the draw pile when it names none.
+        :return: None when there is no such container, or no such pile
         """
         container = self.components_dict.get(target['container_id'])
         pile = target.get('pile', 'draw')

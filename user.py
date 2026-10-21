@@ -12,6 +12,8 @@ class User:
         # the side this player took in the session, among the nationalities of
         # the game; None for a watcher or when the game declares none
         self.nationality = None
+        # the nickname of the player whose view this user follows, or None
+        self.following = None
 
     def return_user_json(self) -> dict:
         """

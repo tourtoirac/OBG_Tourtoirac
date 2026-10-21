@@ -507,6 +507,39 @@ class TestPickupQuantities:
             assert resumed.get_component("deck").card_pickup_quantity == expected
 
 
+class TestPickupPiles:
+    """card_pickup_piles: the piles that show the multi-draw buttons."""
+
+    def piles(self, deck=DECK, **fields):
+        return build_session(dict(deck, **fields)).get_component("deck").return_json()["card_pickup_piles"]
+
+    def test_absent_gives_every_pile(self):
+        assert self.piles() == ["draw", "discard"]
+
+    def test_a_list_keeps_the_piles_it_names_in_the_order_of_the_deck(self):
+        assert self.piles(card_pickup_piles=["discard"]) == ["discard"]
+        assert self.piles(card_pickup_piles=["discard", "draw"]) == ["draw", "discard"]
+        assert self.piles(card_pickup_piles=[]) == []
+
+    def test_unknown_piles_are_ignored(self):
+        assert self.piles(card_pickup_piles=["discard", "graveyard", 3]) == ["discard"]
+        # a single deck has no discard pile
+        assert self.piles(dict(DECK, type="single"), card_pickup_piles=["discard"]) == []
+
+    def test_anything_else_gives_every_pile(self):
+        for value in ("discard", True, None, {"discard": 1}):
+            assert self.piles(card_pickup_piles=value) == ["draw", "discard"]
+
+    def test_the_saved_state_keeps_the_piles(self):
+        session = build_session(dict(DECK, card_pickup_piles=["discard"]))
+        state = json.loads(json.dumps(session.game_json_state()))
+        resumed = Session(
+            user=None, name="JudgeDredd", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=state, started=True,
+        )
+        assert resumed.get_component("deck").card_pickup_piles == ["discard"]
+
+
 class TestOrientation:
     """orientation: the piles of a deck or a stack are turned around their center."""
 

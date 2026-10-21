@@ -197,8 +197,8 @@ class TestStartButton:
             assert protocol.last_status() == {
                 "event": "session_status", "started": True, "missing_players": [],
                 "participants": [
-                    {"nickname": "alice", "role": "player", "connected": True},
-                    {"nickname": "bob", "role": "player", "connected": True},
+                    {"nickname": "alice", "role": "player", "connected": True, "icon": None},
+                    {"nickname": "bob", "role": "player", "connected": True, "icon": None},
                 ],
             }
 

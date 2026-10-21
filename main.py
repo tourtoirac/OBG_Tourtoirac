@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, voice_join, voice_leave, voice_signal, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, voice_join, voice_leave, voice_signal, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, view, follow
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -59,7 +59,7 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "Invalid JSON message"
             )
             return
-        if 'action' in message.keys() and message['action'] not in ['move']:
+        if 'action' in message.keys() and message['action'] not in ['move', 'view']:
             logger.debug(f"Received message : {message}")
         try:
             self.handle_message(message)
@@ -127,6 +127,10 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 show_remove(self, self.factory.lobby.logger, message)
             case "show_close": # a player stops showing cards of its hand
                 show_close(self, self.factory.lobby.logger, message)
+            case "view": # a player tells the center of its view to whoever follows it
+                view(self, self.factory.lobby.logger, message)
+            case "follow": # a reader follows the view of another player, or stops
+                follow(self, self.factory.lobby.logger, message)
             case "order_players": # the owner changes the order the players are listed in
                 order_players(self, self.factory.lobby.logger, message)
             case "deal": # a player deals the top cards of a stack to the private hands

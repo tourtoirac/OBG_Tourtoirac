@@ -39,6 +39,21 @@ def read_deck_orientation(value) -> int:
     return angle if angle % 90 == 0 else 0
 
 
+def read_pickup_piles(value, piles) -> list:
+    """
+    Reads the "card_pickup_piles" key of a deck: the piles that show the
+    multi-draw buttons.
+    :param value: absent (None), or a list of pile names
+    :param piles: the names of the piles of the deck, in their order
+    :return: the piles of the deck the list names, in the order of the deck;
+        all of them when the key is absent or not a list. Unknown names are
+        ignored.
+    """
+    if not isinstance(value, list):
+        return list(piles)
+    return [pile for pile in piles if pile in value]
+
+
 def read_pickup_quantities(value) -> list:
     """
     Reads the "card_pickup_quantity" key of a deck or a stack.
@@ -71,7 +86,8 @@ class Deck(Component):
     """
     def __init__(self, component_id, x, y, width, height, deck_type='single', back_src=None,
                  draw=None, discard=None, text=None, discard_x=None, discard_y=None,
-                 card_pickup_quantity=None, orientation=None, display_shuffle=None):
+                 card_pickup_quantity=None, orientation=None, display_shuffle=None,
+                 card_pickup_piles=None):
         super().__init__(component_id)
         self.kind = 'deck'
         # type: anything but "duo" is a single pile
@@ -102,6 +118,8 @@ class Deck(Component):
         # piles can then no longer be shuffled by the players
         self.display_shuffle = display_shuffle is not False
         self.piles = {pile: [] for pile in DECK_PILES[self.type]}
+        # the piles that show the multi-draw buttons: all of them by default
+        self.card_pickup_piles = read_pickup_piles(card_pickup_piles, self.piles)
         for card in draw or []:
             self.add('draw', card)
         for card in discard or []:
@@ -254,6 +272,7 @@ class Deck(Component):
             "discard_x": self.discard_x,
             "discard_y": self.discard_y,
             "card_pickup_quantity": list(self.card_pickup_quantity),
+            "card_pickup_piles": list(self.card_pickup_piles),
             "orientation": self.orientation,
             "display_shuffle": self.display_shuffle,
             "piles": {pile: self.pile_json(pile) for pile in self.piles},

@@ -12,7 +12,7 @@ import os
 # seconds an action waits for the answer of the server
 ACTION_TIMEOUT = 10
 # the kinds of the components holding piles of cards
-DECK_KINDS = ("deck", "stack")
+DECK_KINDS = ("deck", "stack", "slot")
 # the most cards the server gives for one draw
 DRAW_MAX = 10
 

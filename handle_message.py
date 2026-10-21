@@ -1,4 +1,5 @@
 import json
+import math
 
 from twisted.internet import defer
 
@@ -838,6 +839,82 @@ def chat_send(self, logger, message):
             return
 
     session.post_chat(user, text, to)
+
+
+def read_view_coordinate(value):
+    """
+    A coordinate of a view: a finite number, booleans excluded.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def view(self, logger, message):
+    """
+    A player tells the center of its view, in world coordinates: whoever
+    follows it centers its own view there. The player only sends it while it
+    is followed, which the followed event tells it.
+    """
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    if user.session is None:
+        self.send_error("no_session", "The view action requires an active session")
+        return
+
+    # only the view of a player is followed
+    if user.role != "player":
+        return
+
+    x = read_view_coordinate(message.get("x"))
+    y = read_view_coordinate(message.get("y"))
+    if x is None or y is None:
+        self.send_error("invalid_view", "The view message requires finite x and y")
+        return
+
+    user.session.set_view(user, x, y)
+
+
+def follow(self, logger, message):
+    """
+    A player or a watcher follows the view of another player of the game, or
+    stops when nickname is null. It is sent at once where that player looks,
+    and that player is told when it starts or stops being followed.
+    """
+    logger.debug("Process follow message")
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    session = user.session
+    if session is None:
+        self.send_error("no_session", "The follow action requires an active session")
+        return
+
+    nickname = message.get("nickname")
+    if nickname is None:
+        session.set_following(user, None)
+        return
+
+    if not session.followable(user, nickname):
+        self.send_error("unknown_player", "A reader follows another player of the game")
+        return
+
+    # two readers never follow each other: neither would steer the view
+    if session.follows(nickname, user.name):
+        self.send_error("follows_you", "A reader does not follow a player who follows it")
+        return
+
+    session.set_following(user, nickname)
+    event = session.view_json(nickname)
+    if event is not None:
+        user.send(event)
 
 
 def resolve_show_action(self, action):

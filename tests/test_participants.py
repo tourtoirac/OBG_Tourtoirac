@@ -14,8 +14,8 @@ def build_session(**extra):
     )
 
 
-def line(nickname, role, connected=True):
-    return {"nickname": nickname, "role": role, "connected": connected}
+def line(nickname, role, connected=True, icon=None):
+    return {"nickname": nickname, "role": role, "connected": connected, "icon": icon}
 
 
 class TestParticipants:
@@ -48,6 +48,67 @@ class TestParticipants:
         session = build_session(player_names=["alice"])
         assert session.return_status_json()["participants"] == [line("alice", "player", False)]
         assert session.return_session_json()["participants"] == [line("alice", "player", False)]
+
+
+ICONS = ["/red.png", "/blue.png"]
+
+
+class TestPlayerIcons:
+    """player_icons: an image before the name of each player, one each."""
+
+    def icons(self, session):
+        return {entry["nickname"]: entry["icon"] for entry in session.participants()}
+
+    def test_each_player_gets_a_free_icon_on_its_first_seat(self):
+        session = Session(
+            user=None, name="Vietnam", key="KEY1", code="CODE1", active=True, variant="std",
+            game_json={"game": {"max_players": 3, "max_watchers": 2}, "fixed": [], "movable": [],
+                       "player_icons": ICONS},
+            player_names=["alice", "bob", "carol"],
+        )
+        for name in ("alice", "bob", "carol"):
+            session.add_user(FakeUser(name), "player")
+        icons = self.icons(session)
+        assert sorted([icons["alice"], icons["bob"]]) == sorted(ICONS)
+        # every icon is taken: the third player gets none
+        assert icons["carol"] is None
+
+    def test_a_player_away_keeps_its_icon_and_a_watcher_gets_none(self):
+        session = self.session()
+        alice = FakeUser("alice")
+        session.add_user(alice, "player")
+        first = self.icons(session)["alice"]
+        session.remove_user(alice)
+        session.add_user(FakeUser("alice"), "player")
+        session.add_user(FakeUser("dave"), "watcher")
+        assert self.icons(session)["alice"] == first
+        assert self.icons(session)["dave"] is None
+
+    def test_the_icons_survive_the_saved_state(self):
+        session = self.session()
+        session.add_user(FakeUser("alice"), "player")
+        first = self.icons(session)["alice"]
+        resumed = self.session(session.game_json_state())
+        resumed.add_user(FakeUser("bob"), "player")
+        icons = self.icons(resumed)
+        assert icons["alice"] == first
+        assert icons["bob"] == next(src for src in ICONS if src != first)
+
+    def test_unknown_or_broken_icons_are_ignored(self):
+        game_json = {"player_icons": ["/red.png", "", 3, "/red.png"], "player_icon_of": {"alice": "/gone.png"}}
+        session = self.session(game_json)
+        assert session.player_icons == ["/red.png"]
+        assert session.player_icon_of == {}
+
+    @staticmethod
+    def session(state=None):
+        game_json = {"game": {"max_players": 3, "max_watchers": 2}, "fixed": [], "movable": [],
+                     "player_icons": ICONS}
+        game_json.update(state or {})
+        return Session(
+            user=None, name="Vietnam", key="KEY1", code="CODE1", active=True, variant="std",
+            game_json=game_json, player_names=["alice", "bob"],
+        )
 
 
 class TestOrder:

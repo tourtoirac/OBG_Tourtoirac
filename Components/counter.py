@@ -80,6 +80,57 @@ def read_limit(limit):
     return int(limit)
 
 
+# the optional label drawn above the value never takes more than two lines
+MAX_TEXT_LINES = 2
+
+
+def read_text(text):
+    """
+    Reads the optional label of a counter. Only a string is kept: anything else,
+    or a label left blank, means no label. Line breaks split it into lines, and
+    only the first MAX_TEXT_LINES are kept so the client never has to fit more.
+    :param text: the text field as read from the game_json
+    :return: the label, its lines joined by "\n", or None
+    """
+    if not isinstance(text, str):
+        return None
+    lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
+    lines = [line for line in lines if line][:MAX_TEXT_LINES]
+    return "\n".join(lines) if lines else None
+
+
+# thickness of the frame when the game asks for one without giving a width
+DEFAULT_BORDER_WIDTH = 3
+
+
+def read_border(border, font_color):
+    """
+    Reads the optional frame of a counter. A color string draws the frame in
+    that color; true draws it in the color of the value, so it matches the
+    figures. Anything else (absent, false, a number) means no frame.
+    :param border: the border field as read from the game_json
+    :param font_color: the color of the value, used when border is true
+    :return: the color of the frame, or None
+    """
+    if border is True:
+        return font_color
+    if isinstance(border, str) and border.strip():
+        return border.strip()
+    return None
+
+
+def read_border_width(width) -> float:
+    """
+    Reads the thickness of the frame. Only a positive number is kept, so a
+    mistake in the game_json falls back on the default instead of hiding it.
+    :param width: the border_width field as read from the game_json
+    :return: a positive thickness, in world pixels
+    """
+    if isinstance(width, bool) or not isinstance(width, (int, float)) or width <= 0:
+        return DEFAULT_BORDER_WIDTH
+    return width
+
+
 class Counter(Component):
     """
     Un compteur de valeurs : un pave fige qui affiche un nombre, qu'on fait
@@ -92,7 +143,8 @@ class Counter(Component):
     """
     # counters are objects that display an integer value
     def __init__(self, component_id, x, y, width, height, color, value,
-                 font_color=None, min_value=None, max_value=None):
+                 font_color=None, min_value=None, max_value=None, text=None,
+                 border=None, border_width=None):
         super().__init__(component_id)
         self.kind = 'counter'
         self.x = x
@@ -106,6 +158,11 @@ class Counter(Component):
         self.font_color = font_color if font_color else readable_font_color(color)
         self.width = width
         self.height = height
+        # optional label drawn above the value, in the same color, at most two lines
+        self.text = read_text(text)
+        # optional frame around the component: its color, or None for no frame
+        self.border = read_border(border, self.font_color)
+        self.border_width = read_border_width(border_width)
         # bornes de la valeur, facultatives : None des deux cotes, le compteur est
         # libre. Un jeu qui declare min plus grand que max les intervertit plutot
         # que d interdire toute valeur : il veut une plage, pas un compteur bloque.
@@ -131,7 +188,10 @@ class Counter(Component):
             "font_color": self.font_color,
             "value": self.value,
             "min": self.min,
-            "max": self.max
+            "max": self.max,
+            "text": self.text,
+            "border": self.border,
+            "border_width": self.border_width
         }
 
     def clamp_value(self, value: int) -> int:

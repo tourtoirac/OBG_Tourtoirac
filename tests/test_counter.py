@@ -15,7 +15,10 @@ import pytest
 from Components.counter import (
     DEFAULT_COUNTER_COLOR,
     Counter,
+    read_border,
+    read_border_width,
     read_limit,
+    read_text,
     read_value,
 )
 from handle_message import decrement, increment
@@ -262,6 +265,9 @@ class TestLoadingCounter:
             "value": 3,
             "min": None,
             "max": None,
+            "text": None,
+            "border": None,
+            "border_width": 3,
         }
 
     def test_the_value_is_saved_and_restored(self):
@@ -610,3 +616,43 @@ class TestOnlyPlayersCount:
 
         assert protocol.sent[-1]["error"]["code"] == "watcher_not_allowed"
         assert session.get_component("counter").value == 3
+
+class TestText:
+    def test_a_counter_has_no_text_by_default(self):
+        assert Counter("c1", 0, 0, 10, 10, "#000000", 0).text is None
+
+    def test_the_text_of_the_game_json_reaches_the_client(self):
+        session = build_session(text="Score\nBleu")
+        sent = {c["id"]: c for c in session.return_session_json()["components"]["fixed"]}
+        assert sent["counter"]["text"] == "Score\nBleu"
+
+    def test_only_two_lines_are_kept(self):
+        assert read_text("a\r\nb\nc") == "a\nb"
+
+    def test_blank_lines_are_dropped(self):
+        assert read_text("  \n Score \n\n") == "Score"
+
+    @pytest.mark.parametrize("text", [None, "", "   ", 3, True, ["a"]])
+    def test_anything_but_a_text_means_no_text(self, text):
+        assert read_text(text) is None
+
+
+class TestBorder:
+    def test_a_counter_has_no_frame_by_default(self):
+        assert Counter("c1", 0, 0, 10, 10, "#000000", 0).border is None
+
+    def test_the_frame_of_the_game_json_reaches_the_client(self):
+        session = build_session(border="#ff0000", border_width=5)
+        sent = {c["id"]: c for c in session.return_session_json()["components"]["fixed"]}
+        assert (sent["counter"]["border"], sent["counter"]["border_width"]) == ("#ff0000", 5)
+
+    def test_true_frames_in_the_color_of_the_value(self):
+        assert build_session(border=True).get_component("counter").border == "#ffcc00"
+
+    @pytest.mark.parametrize("border", [None, False, "", 2])
+    def test_anything_else_means_no_frame(self, border):
+        assert read_border(border, "#000000") is None
+
+    @pytest.mark.parametrize("width", [None, 0, -1, "4", True])
+    def test_a_wrong_width_falls_back_on_the_default(self, width):
+        assert read_border_width(width) == 3
