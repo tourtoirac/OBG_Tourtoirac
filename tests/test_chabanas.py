@@ -66,6 +66,17 @@ class Backend(resource.Resource):
         if path == "/session/update":
             return json.dumps({"status": "success"}).encode()
 
+        if path == "/session/occupy":
+            if body.get("code") == "PLEIN":
+                request.setResponseCode(409)
+            return b"{}"
+
+        if path == "/session/launch":
+            if body.get("key") == "INCONNU":
+                request.setResponseCode(404)
+                return b"{}"
+            return json.dumps({"launched_at": "2026-10-22T08:00:00+00:00"}).encode()
+
         if path == "/session/archive":
             # the real view answers with plain text, not JSON, and says so
             # through its status code
@@ -196,6 +207,17 @@ class TestSuccessfulCalls:
 
     def test_update_session_state(self, chabanas, sync):
         assert sync(chabanas.update_session_state("KEY1", {"movable": []})) is True
+
+    def test_occupy_game_reads_the_status(self, chabanas, sync):
+        assert sync(chabanas.occupy_game("CODE1")) == 200
+        assert sync(chabanas.occupy_game("PLEIN")) == 409
+
+    def test_occupy_game_without_chabanas(self, failing_chabanas, sync):
+        # a 404 still answers: only a missing answer gives None
+        assert sync(failing_chabanas.occupy_game("CODE1")) == 404
+
+    def test_launch_session(self, chabanas, sync):
+        assert sync(chabanas.launch_session("KEY1")) is True
 
     def test_archive_session_reads_a_plain_text_answer(self, chabanas, sync):
         """

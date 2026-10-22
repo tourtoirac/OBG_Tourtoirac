@@ -36,6 +36,7 @@ def list_sessions(self, logger, _):
 CREATE_REFUSALS = {
     "invalid_nationality": "This game requires choosing one of its nationalities",
     "duplicate_component_ids": "This game declares several components with the same id: it cannot be started",
+    "server_full": "The server already runs its maximum number of games",
 }
 
 
@@ -115,6 +116,7 @@ JOIN_REFUSALS = {
     "session_closed": "This game is closed",
     "nickname_connected": "This nickname is already playing",
     "invalid_nationality": "This game requires choosing one of its nationalities",
+    "server_full": "The server already runs its maximum number of games",
 }
 
 
@@ -295,7 +297,7 @@ def resume_session(self, logger, message):
     )
 
     if not success:
-        self.send_error(error, f"Unable to resume session {session_key}")
+        self.send_error(error, JOIN_REFUSALS.get(error, f"Unable to resume session {session_key}"))
         return
 
     logger.debug(f"{user.name} resumed session {session_key}")
@@ -488,6 +490,7 @@ def release(self, logger, message):
     bag = None
     deck, pile = None, None
     character = None
+    generator = None
     # hand: true asks to keep the token in the private hand of the player
     # instead of putting it down. Only a token or a card goes there.
     # A game without private hands puts the token down where it is released.
@@ -508,7 +511,12 @@ def release(self, logger, message):
                 "A token is given to another player of the game"
             )
             return
-    if "x" in message and "y" in message and not to_hand:
+    # generator: true, the token was released over the column of the
+    # generators. A copy one of them created is destroyed; any other token is
+    # put down where it is.
+    if message.get("generator") is True and not to_hand:
+        generator = user.session.generator_of(component)
+    if "x" in message and "y" in message and not to_hand and generator is None:
         # a token released over a bag falls into it, whatever lies under the bag
         bag = user.session.bag_at(component, message["x"], message["y"])
         # and a card released over a pile of a deck joins that pile
@@ -525,7 +533,11 @@ def release(self, logger, message):
         bag = None
         deck, pile = None, None
         character = None
+        generator = None
         to_hand = False
+    elif generator is not None:
+        # the copy goes back to its generator: it leaves the game
+        user.session.destroy_copy(generator, component)
     elif to_hand:
         # the token leaves the table for the hand of the player, or of the
         # player it was given to
@@ -560,6 +572,9 @@ def release(self, logger, message):
                 # character_json is that character after the release
                 "character_id": character.id if character is not None else None,
                 "character_json": character.return_json() if character is not None else None,
+                # the generator the copy was destroyed over, None when it
+                # stays in the game
+                "generator_id": generator.id if generator is not None else None,
                 # the nickname of the player whose private hand took the token,
                 # None when it did not go to a hand
                 "hand_of": receiver if to_hand else None,
@@ -800,8 +815,8 @@ def voice_signal(self, logger, message):
 def chat_send(self, logger, message):
     """
     Sends a message on the chat of the session: on the general channel when
-    "to" is absent or null, which players and watchers write in, or to one
-    other player of the game, which only a player does.
+    "to" is absent or null, or to one other player of the game. Only a player
+    writes: a watcher reads the general channel and nothing else.
     """
     logger.debug("Process chat_send message")
     user = self.factory.lobby.get_user(self)
@@ -816,6 +831,13 @@ def chat_send(self, logger, message):
         self.send_error(
             "no_session",
             "The chat_send action requires an active session"
+        )
+        return
+
+    if user.role != 'player':
+        self.send_error(
+            "watcher_cannot_chat",
+            "A watcher reads the chat but does not write in it"
         )
         return
 
@@ -1116,6 +1138,75 @@ def pick(self, logger, message):
         # each client must tell its own token from the other's
         "request_id": request_id if isinstance(request_id, str) else None,
         "component_json": token.return_json(),
+    })
+
+
+def generate(self, logger, message):
+    """
+    Creates a new copy of a model of a generator. The client says which
+    generator, which model and where: the copy enters the table under the
+    pointer and in the hand of the player, as a pick from a bag does.
+    """
+    logger.debug("Process generate message")
+    user, component, ready = resolve_component_action(
+        self, message, "generate", ["component_id", "model_id"]
+    )
+    if not ready:
+        return
+
+    # the copy lands in the hand of the player: same conditions as taking a
+    # token from the table
+    refusal = user.session.acquire_refusal()
+    if refusal is not None:
+        message_text = ACQUIRE_REFUSALS[refusal]
+        missing = user.session.missing_players()
+        if missing:
+            message_text = f"{message_text}: {', '.join(missing)}"
+        self.send_error(refusal, message_text)
+        return
+
+    component_id = message["component_id"]
+    if component.kind != 'generator':
+        self.send_error(
+            "component_not_a_generator",
+            f"Component {component_id} is not a generator"
+        )
+        return
+
+    model_id = message["model_id"]
+    model = component.model(model_id)
+    if model is None:
+        self.send_error(
+            "unknown_model",
+            f"Generator {component_id} has no model {model_id}"
+        )
+        return
+
+    # a model that belongs to a nationality is only copied by a player of
+    # that nationality, as its copies are only touched by them
+    nationality = model.get('nationality')
+    if isinstance(nationality, str) and nationality and getattr(user, 'nationality', None) != nationality:
+        self.send_error(
+            "wrong_nationality",
+            f"Model {model_id} belongs to {nationality}"
+        )
+        return
+
+    copy = user.session.generate(component, model_id, user, message.get("x"), message.get("y"))
+    request_id = message.get("request_id")
+    # sent to everyone: each screen builds the copy and shows it in the hand
+    # of the player who created it
+    user.session.send({
+        "event": "generate",
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
+        "component_id": component_id,
+        "model_id": model_id,
+        "user": user.id,
+        # echoed as is: two players may drag a copy out at once, and each
+        # client must tell its own copy from the other's
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "component_json": copy.return_json(),
     })
 
 

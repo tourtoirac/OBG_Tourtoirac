@@ -35,6 +35,10 @@ class BytesBodyProducer:
         pass
 
 
+# the name this server declares its games in progress under, in Chabanas
+SERVICE = "tourtoirac"
+
+
 class Chabanas:
     def __init__(self, logger, agent=None, timeout=10.0):
         self.logger = logger
@@ -137,6 +141,9 @@ class Chabanas:
         if status == 422:
             # the game declares nationalities and the player chose none of them
             return None, "invalid_nationality"
+        if status == 409:
+            # the platform already runs its maximum number of games
+            return None, "server_full"
         if not created:
             return None, "Unable to create session"
 
@@ -198,17 +205,22 @@ class Chabanas:
         return session, None
 
     @defer.inlineCallbacks
-    def get_active_sessions(self, sat_list):
+    def list_active(self, sat_list):
         """
-        Active sessions of every active game: without game_name_list,
-        Chabanas lists its whole catalogue.
+        The /session/list answer: active sessions of every active game (without
+        game_name_list, Chabanas lists its whole catalogue), and the number of
+        active games of the platform with its limit. {} on failure.
         """
         self.logger.debug("Getting lobby active sessions")
         response = yield self._post_json("/session/list", {
             "sat_list": sat_list
         })
-        if not response:
-            return {}
+        return response if isinstance(response, dict) else {}
+
+    @defer.inlineCallbacks
+    def get_active_sessions(self, sat_list):
+        """Active sessions of every active game."""
+        response = yield self.list_active(sat_list)
         return response.get('sessions', {})
 
     @defer.inlineCallbacks
@@ -245,6 +257,49 @@ class Chabanas:
             "started": True,
         })
         return bool(response)
+
+    @defer.inlineCallbacks
+    def launch_session(self, session_key: str):
+        """
+        Tells Chabanas that a player has just launched the game of a session.
+        A session nobody launches anymore is archived by Chabanas after a while.
+        :return: True when Chabanas acknowledged the launch
+        """
+        response = yield self._post_json("/session/launch", {
+            "key": str(session_key),
+        })
+        return bool(response)
+
+    @defer.inlineCallbacks
+    def occupy_game(self, session_code: str):
+        """
+        A player enters a game nobody plays in: Chabanas counts the games with
+        players in them, every service included, and refuses one more beyond its
+        limit.
+        :return: the status of Chabanas (200 admitted, 409 platform full, 404
+            unknown code), None when it did not answer
+        """
+        response = yield self._post_json("/session/occupy", {
+            "code": session_code,
+            "service": SERVICE,
+        }, with_status=True)
+        if not response:
+            return None
+        return response[0]
+
+    def vacate_game(self, session_code: str):
+        """The last player left that game: its place is free again. Failures are only logged."""
+        return self._post_json("/session/vacate", {"code": session_code})
+
+    def sync_occupancy(self, session_codes: list):
+        """
+        Every game this server has players in: Chabanas checks its count against
+        it and corrects it. Sent at start (empty) and every hour.
+        """
+        return self._post_json("/session/sync_occupancy", {
+            "service": SERVICE,
+            "codes": session_codes,
+        })
 
     @defer.inlineCallbacks
     def archive_session(self, session_key: str):

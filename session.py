@@ -11,6 +11,7 @@ from Components.mw_character import MwCharacter
 from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
+from Components.generator import Generator
 from Components.slot import Slot
 from Components.stack import Stack
 from Components.token import Token
@@ -562,6 +563,8 @@ class Session:
         self.hides_faces = any(
             isinstance(component, Card)
             or (isinstance(component, Token) and component.nationality is not None)
+            # the copies a generator will hand out
+            or (isinstance(component, Generator) and component.hides_faces())
             for component in self.components_dict.values()
         )
 
@@ -622,6 +625,10 @@ class Session:
                                 self.components_dict[component['id']] = game_component
                         case 'bag' if list_name == 'fixed':
                             game_component = self.build_bag(component)
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
+                        case 'generator' if list_name == 'fixed':
+                            game_component = self.build_generator(component)
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
                         case 'deck' | 'stack' | 'slot' if list_name == 'fixed':
@@ -1007,6 +1014,67 @@ class Session:
             # count: true shows the number of tokens left in the bag
             component.get('count', False)
         )
+
+    def build_generator(self, component: dict) -> Generator:
+        """
+        Builds a generator. Each of its models is built once, as its copies
+        will be, so that a model the game describes wrongly is reported when
+        the session is built rather than when a player drags it out.
+        :param component: the generator description from the game_json
+        """
+        generator = Generator(
+            component['id'],
+            component.get('components'),
+            # generated and created: only there on a saved session
+            component.get('generated'),
+            component.get('created'),
+        )
+        for model in generator.models:
+            builder = self.build_card if model['kind'] == 'card' else self.build_token
+            build_checked(builder, dict(model, x=0, y=0), 'fixed', generator.id)
+        return generator
+
+    def generator_of(self, component) -> Generator | None:
+        """The generator that created a component still in the game, or None."""
+        for candidate in self.components_lists['fixed']:
+            if isinstance(candidate, Generator) and candidate.created_copy(component):
+                return candidate
+        return None
+
+    def generate(self, generator: Generator, model_id, user: User, x=None, y=None):
+        """
+        Creates a new copy of a model of a generator and puts it in the hand of
+        user: it enters the table above the others, centered on (x, y), with
+        no starting square, like a token picked from a bag.
+        :return: the copy, or None when the generator has no such model
+        """
+        description = generator.copy_description(model_id, self.components_dict)
+        if description is None:
+            return None
+        if description['kind'] == 'card':
+            copy = self.build_card(description)
+        else:
+            copy = self.build_token(description)
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
+            x = copy.width / 2
+            y = copy.height / 2
+        copy.leave_table()
+        copy.enter_table(x - copy.width / 2, y - copy.height / 2)
+        self.components_lists['movable'].append(copy)
+        self.components_dict[copy.id] = copy
+        copy.acquire(user)
+        return copy
+
+    def destroy_copy(self, generator: Generator, component) -> None:
+        """
+        Removes a copy released over its generator from the game: it leaves
+        the table and the session, and the saved state no longer holds it.
+        """
+        movable = self.components_lists['movable']
+        if component in movable:
+            movable.remove(component)
+        self.components_dict.pop(component.id, None)
+        generator.destroy(component)
 
     def load_hands(self, saved) -> None:
         """

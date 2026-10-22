@@ -49,6 +49,10 @@ class FakeChabanas(Chabanas):
         # ce que /session/list renvoie : surcharge par les tests du lobby
         self.list_response = {"sessions": {}}
 
+    # status of /session/create, overridden by the refusal tests
+    create_status = 200
+    # status of /session/occupy: 409 when the platform is full
+    occupy_status = 200
     # statut renvoye pour /session/join, surcharge par les tests de refus
     join_status = 200
     # reponse de /session/join quand join_status n'est pas un succes
@@ -60,6 +64,8 @@ class FakeChabanas(Chabanas):
         if not self.available:
             return self._fired(False, with_status)
         if path == "/session/create":
+            if self.create_status != 200:
+                return defer.succeed((self.create_status, False))
             return self._fired({"session_code": self.info["code"]}, with_status)
         if path == "/session/get":
             # seule la session connue repond : un code inconnu renvoie False,
@@ -78,6 +84,8 @@ class FakeChabanas(Chabanas):
             return self._fired(True, with_status)
         if path == "/session/list":
             return self._fired(self.list_response, with_status)
+        if path == "/session/occupy":
+            return defer.succeed((self.occupy_status, {}))
         if path == "/game/list":
             return self._fired({"game_list": [{"name": self.info["name"]}]}, with_status)
         return self._fired({}, with_status)
@@ -270,7 +278,8 @@ class TestJoinSession:
         assert success is True
         assert error is None
         assert guest.session is host.session, "la session du lobby doit etre reutilisee"
-        assert lobby.chabanas.calls == ["/session/create", "/session/get", "/session/join"], (
+        # the creation declared the session in progress; bob joins a player
+        assert lobby.chabanas.calls == ["/session/create", "/session/get", "/session/occupy", "/session/join"], (
             "Chabanas doit toujours valider l'adhesion, meme pour une session en cache"
         )
 
@@ -680,6 +689,43 @@ class TestResumeAfterTheLobbyIsLeft:
         lobby._remove_session_if_still_empty(host.session)
 
         assert lobby.sessions[host.session.key] is host.session
+
+
+class TestLaunchIsDated:
+    """Every player launching the game dates the launch in Chabanas."""
+
+    def launches(self, lobby):
+        return [payload for path, payload in lobby.chabanas.payloads if path == "/session/launch"]
+
+    def test_a_resumed_player_dates_the_launch(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        resumer = connect(lobby, "alice")
+        sync(lobby.resume_session(session_info["key"], resumer, "player", session_info["code"]))
+
+        assert self.launches(lobby) == [{"key": session_info["key"]}]
+
+    def test_a_watcher_does_not_date_the_launch(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        watcher = connect(lobby, "bob")
+        success, _ = sync(lobby.resume_session(session_info["key"], watcher, "watcher", session_info["code"]))
+
+        assert success is True
+        assert self.launches(lobby) == []
+
+    def test_an_undated_launch_does_not_stop_the_player(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.chabanas.available = False
+
+        resumer = connect(lobby, "alice")
+        success, error = sync(lobby.resume_session(session_info["key"], resumer, "player", session_info["code"]))
+
+        assert (success, error) == (True, None)
+        assert self.launches(lobby) == [{"key": session_info["key"]}]
 
 
 class TestSessionStateReload:
@@ -1222,6 +1268,102 @@ class TestConnectedPlayersInLobbyListing:
         result = sync(lobby.return_active_sessions([]))
 
         assert result["active"]["Waterloo"][0]["players"][0]["connected"] is False
+
+
+class TestPlatformLoad:
+    def test_the_listing_carries_the_number_of_active_games(self, lobby, sync):
+        lobby.chabanas.list_response = {"sessions": {}, "active_games": 7, "max_active_games": 20}
+
+        result = sync(lobby.return_active_sessions([]))
+
+        assert (result["active_games"], result["max_active_games"]) == (7, 20)
+
+    def test_a_full_platform_refuses_the_creation(self, lobby, sync):
+        lobby.chabanas.create_status = 409
+        user = connect(lobby, "alice")
+
+        success, error = sync(lobby.create_session("Waterloo", user, "key"))
+
+        assert (success, error) == (False, "server_full")
+        assert lobby.sessions == {}
+
+
+class TestGamesInProgress:
+    """Chabanas counts in real time the sessions with players in them."""
+
+    def paths(self, lobby, path):
+        return [payload for p, payload in lobby.chabanas.payloads if p == path]
+
+    def test_the_creator_declares_the_session_in_progress(self, lobby, sync, session_info):
+        sync(lobby.create_session("Waterloo", connect(lobby, "alice"), "key"))
+        assert self.paths(lobby, "/session/occupy") == [{"code": session_info["code"], "service": "tourtoirac"}]
+
+    def test_a_creation_refused_by_a_full_platform_is_archived(self, lobby, sync, session_info):
+        lobby.chabanas.occupy_status = 409
+        user = connect(lobby, "alice")
+
+        success, error = sync(lobby.create_session("Waterloo", user, "key"))
+
+        assert (success, error) == (False, "server_full")
+        assert lobby.sessions == {}
+        assert "/session/archive" in lobby.chabanas.calls
+
+    def test_a_player_entering_an_empty_session_is_refused_when_full(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        lobby.delete_user(host)
+        lobby.chabanas.occupy_status = 409
+
+        resumer = connect(lobby, "alice")
+        success, error = sync(lobby.resume_session(session_info["key"], resumer, "player", session_info["code"]))
+
+        assert (success, error) == (False, "server_full")
+        assert session_info["key"] not in lobby.sessions
+
+    def test_a_player_joining_players_is_not_counted_again(self, lobby, sync, session_info):
+        sync(lobby.create_session("Waterloo", connect(lobby, "alice"), ""))
+        lobby.chabanas.occupy_status = 409
+
+        success, _ = sync(lobby.join_session(session_info["code"], connect(lobby, "bob")))
+
+        assert success is True
+        assert len(self.paths(lobby, "/session/occupy")) == 1
+
+    def test_a_watcher_is_not_counted(self, lobby, sync, session_info):
+        lobby.chabanas.occupy_status = 409
+
+        success, _ = sync(lobby.join_session(session_info["code"], connect(lobby, "eve"), role="watcher"))
+
+        assert success is True
+        assert self.paths(lobby, "/session/occupy") == []
+
+    def test_the_last_player_leaving_frees_the_place(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        guest = connect(lobby, "bob")
+        sync(lobby.join_session(session_info["code"], guest))
+
+        lobby.delete_user(guest)
+        assert self.paths(lobby, "/session/vacate") == []
+        lobby.delete_user(host)
+        assert self.paths(lobby, "/session/vacate") == [{"code": session_info["code"]}]
+
+    def test_closing_the_session_frees_the_place(self, lobby, sync, session_info):
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+
+        sync(lobby.close_session(host.session))
+
+        assert self.paths(lobby, "/session/vacate") == [{"code": session_info["code"]}]
+
+    def test_the_hourly_check_sends_the_sessions_with_players(self, lobby, sync, session_info):
+        sync(lobby.create_session("Waterloo", connect(lobby, "alice"), ""))
+
+        sync(lobby.sync_occupancy())
+
+        assert self.paths(lobby, "/session/sync_occupancy") == [
+            {"service": "tourtoirac", "codes": [session_info["code"]]}
+        ]
 
 
 class TestShutdown:

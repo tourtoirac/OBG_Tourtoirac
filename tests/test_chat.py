@@ -46,11 +46,13 @@ class TestGeneralChannel:
             assert message["to"] is None
             assert message["text"] == "hello"
 
-    def test_a_watcher_writes_in_the_general_channel(self):
+    def test_a_watcher_does_not_write_in_the_general_channel(self):
         session = build_session()
         _, (a, _), dave = table(session)
-        ask(chat_send, FakeProtocol(dave), text="go go")
-        assert events(a, "chat")[-1]["message"]["from"] == "dave"
+        watcher = FakeProtocol(dave)
+        ask(chat_send, watcher, text="go go")
+        assert error_codes(watcher) == ["watcher_cannot_chat"]
+        assert events(a, "chat") == []
 
     def test_an_empty_or_too_long_text_is_refused(self):
         session = build_session()
@@ -92,7 +94,7 @@ class TestPrivateChannels:
         _, (a, _), dave = table(session)
         watcher = FakeProtocol(dave)
         ask(chat_send, watcher, text="hi", to="alice")
-        assert error_codes(watcher) == ["unknown_player"]
+        assert error_codes(watcher) == ["watcher_cannot_chat"]
         assert events(a, "chat") == []
 
     def test_nobody_writes_to_an_unknown_player_or_to_itself(self):

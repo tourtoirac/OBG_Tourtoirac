@@ -22,10 +22,14 @@ class Lobby:
         """
         Returns a list of the active sessions of the lobby
         """
-        active = yield self.chabanas.get_active_sessions(sat_list)
+        response = yield self.chabanas.list_active(sat_list)
+        active = response.get("sessions", {})
         self._mark_connected_players(active)
         return {
             "active": active,
+            # every game of the platform, Air Force included, and the limit
+            "active_games": response.get("active_games"),
+            "max_active_games": response.get("max_active_games"),
         }
 
     def _mark_connected_players(self, active: dict) -> None:
@@ -198,9 +202,17 @@ class Lobby:
             raise
         self.add_session(session)
 
+        # the platform may have filled up since Chabanas created the session
+        admitted = yield self._admit_player(session)
+        if not admitted:
+            self.remove_session(session)
+            yield self.chabanas.archive_session(session.key)
+            return False, "server_full"
+
         success, reason = session.add_user(user, "player")
         if not success:
             self.remove_session(session)
+            self._release_if_empty(session)
             return False, reason
 
         user.session = session
@@ -246,8 +258,15 @@ class Lobby:
             # la session vit deja ici : on garde son etat (jetons deplaces) et on
             # ignore le game_json renvoie par Chabanas, qui est celui du stockage
 
+        if role == "player":
+            admitted = yield self._admit_player(session)
+            if not admitted:
+                self._forget_if_unused(session)
+                return False, "server_full"
+
         success, reason = session.add_user(user, role)
         if not success:
+            self._release_if_empty(session)
             return False, reason
 
         user.session = session
@@ -308,14 +327,77 @@ class Lobby:
                 and user.name not in session.player_names):
             return False, "session_started"
 
+        if role == "player":
+            admitted = yield self._admit_player(session)
+            if not admitted:
+                self._forget_if_unused(session)
+                return False, "server_full"
+
         success, reason = session.add_user(user, role)
         if not success:
+            self._release_if_empty(session)
             return False, reason
 
         user.session = session
+        if role == "player":
+            self._record_launch(session)
         self._notify_lobby_users("join", session, user)
         self._send_status(session)
         return True, None
+
+    def _record_launch(self, session: Session):
+        """
+        Dates the launch of the game in Chabanas, without holding the player
+        back: a launch that cannot be dated is only logged.
+        """
+        deferred = self.chabanas.launch_session(session.key)
+        deferred.addCallback(
+            lambda launched: launched or self.logger.error(
+                f"[SESSION] Unable to date the launch of session {session.key}"
+            )
+        )
+
+    @defer.inlineCallbacks
+    def _admit_player(self, session: Session):
+        """
+        A player is about to enter the session. A session with players in it is
+        already counted by Chabanas; an empty one is declared, and refused when
+        the platform already runs its maximum number of games in progress.
+        Chabanas not answering does not hold the player back: the hourly check
+        corrects the count.
+        :return: False when the platform is full
+        """
+        if session.players:
+            return True
+        status = yield self.chabanas.occupy_game(session.code)
+        if status is None:
+            self.logger.error(f"[SESSION] Chabanas did not count session {session.code} as in progress")
+        return status != 409
+
+    def _release_if_empty(self, session: Session):
+        """The last player left: the session no longer counts as in progress."""
+        if not session.players and session.code:
+            self.chabanas.vacate_game(session.code)
+
+    def _forget_if_unused(self, session: Session):
+        """A session rebuilt for a player who was refused, with nobody else in it."""
+        if not session.players and not session.watchers:
+            self.remove_session(session)
+
+    def occupied_codes(self) -> list:
+        """The codes of the sessions with players in them, for the hourly check of Chabanas."""
+        return sorted(
+            session.code for session in self.sessions.values()
+            if session.players and session.code and not session.closed
+        )
+
+    @defer.inlineCallbacks
+    def sync_occupancy(self):
+        """Sends Chabanas the sessions with players in them: it checks and corrects its count."""
+        codes = self.occupied_codes()
+        response = yield self.chabanas.sync_occupancy(codes)
+        if response:
+            self.logger.info(f"[SESSION] {len(codes)} session(s) in progress checked with Chabanas: {response}")
 
     @defer.inlineCallbacks
     def _reload_session(self, session_key: str, session_code: str | None):
@@ -430,6 +512,8 @@ class Lobby:
             return False, "session_not_archived"
 
         demoted = session.close()
+        # the players became watchers: the game is no longer in progress
+        self.chabanas.vacate_game(session.code)
         self.logger.info(
             f"[SESSION] {session.key} closed by its owner, "
             f"{len(demoted)} player(s) turned into watcher(s)"
@@ -497,6 +581,7 @@ class Lobby:
                 session = self.sessions.get(user.session.key)
                 if session is not None:
                     session.remove_user(user)
+                    self._release_if_empty(session)
                     self._notify_lobby_users("leave", session, user)
                     self._send_status(session)
                     self._save_state_if_empty(session)

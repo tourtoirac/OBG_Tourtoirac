@@ -58,6 +58,7 @@ ni réseau ni service externe ne sont requis.
 | `chabanas.py`          | Client HTTP vers le back-end, via `IBodyProducer` |
 | `lobby.py` `user.py`   | Lobby et utilisateur connecté |
 | `player_sim.py`        | Simulateur de joueur, pour essai manuel |
+| `loadtest.py`          | Test de charge : tables de bots par paliers, latences, limite tenue |
 | `conf.py`              | **Code mort** : importé nulle part (voir § Configuration) |
 
 ### Objets en mémoire
@@ -109,12 +110,13 @@ leur attache un errback de journalisation.
 | `close_session` | `session_closed` puis `session_players_changed` | session, puis lobby |
 | `start_session` (owner) | `session_status` puis `session_players_changed` (`action: "started"`) | session, puis lobby |
 | (adhésion, reprise, départ) | `session_status` `{started, missing_players}` | session |
-| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`), `deck_id`/`pile`/`deck_json`, `character_id`/`character_json` (le `mw_character` sous lequel la carte est passée) | session |
+| `acquire` / `release` | `acquire` / `release` `{component_id, user, success}` ; `release` porte aussi `component_json` et `bag_id` (le sac où le pion est tombé, sinon `null`), `deck_id`/`pile`/`deck_json`, `character_id`/`character_json` (le `mw_character` sous lequel la carte est passée), `generator_id` (le générateur sur lequel la copie a été détruite) | session |
 | `voice_join` | `voice_joined` `{peers, ice_servers}` à l'appelant, puis `voice_members` `{members}` | appelant, puis session |
 | `voice_leave` | `voice_members` `{members}` | session |
 | `voice_signal` `{to, data}` | `voice_signal` `{from, data}` | le seul destinataire |
-| `chat_send` `{text, to?}` | `chat` `{message}` | session (général) ou les deux joueurs (privé) |
+| `chat_send` `{text, to?}` (joueurs seuls) | `chat` `{message}` | session (général) ou les deux joueurs (privé) |
 | `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
+| `generate` `{component_id, model_id, x?, y?, request_id?}` | `generate` `{component_id, model_id, user, nickname, request_id, component_json}` | session |
 | `pick` `{component_id, x?, y?, request_id?}` | `pick` `{component_id, user, request_id, component_json}` ; sur un `mw_character`, aussi `character_json` | session |
 | `draw` `{component_id, pile?, count?, x?, y?, request_id?}` | `draw` `{component_id, pile, user, request_id, index, count, component_json, deck_json}`, **un événement par carte** | session |
 | `shuffle` `{component_id, pile?}` | `shuffle` `{component_id, pile, user, nickname, deck_json}` | session |
@@ -169,6 +171,17 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
   vide**. La page de jeu envoie `resume_session` (avec `session_key` et
   `session_code`) ; si la session n'est plus en mémoire, `_reload_session` la
   reconstruit depuis Chabanas.
+- **Lancement daté** : chaque `resume_session` réussi d'un **joueur** (pas d'un
+  spectateur) appelle `launch_session` (`/session/launch`) sans attendre la
+  réponse ; un échec est seulement journalisé. Chabanas archive une session
+  qu'aucun joueur n'a lancée depuis 15 jours.
+- **Parties en cours** (limite de la plateforme, comptée par Chabanas) : un
+  joueur qui entre dans une session sans joueur (création, `join_session`,
+  `resume_session`) passe par `Lobby._admit_player` → `/session/occupy` ; 409 =
+  refus `server_full`. Le dernier joueur qui part (`delete_user`, clôture)
+  libère la place (`/session/vacate`). Les spectateurs ne comptent pas.
+  `main.start_server` lance `Lobby.sync_occupancy` au démarrage puis toutes les
+  heures (`OCCUPANCY_CHECK_INTERVAL`) : Chabanas corrige son compte.
 - **Clôture** (owner seulement) : `update_session_state` puis `archive_session`.
   Les joueurs deviennent spectateurs et la session reste en mémoire, marquée
   `closed`.
@@ -185,7 +198,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que douze `kind` :
+`Session.load_session_components` ne reconnaît que treize `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
@@ -201,6 +214,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 | `slot` | `Slot` | `fixed` | sous-classe de `Deck` à une seule pile où les cartes gardent leur face (voir § Emplacement de cartes) ; uniquement s'il est déclaré dans `fixed` |
 | `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck` / `stack`) |
 | `mw_character` | `MwCharacter` | `fixed` | carte immobile à deux colonnes de cases (voir § Personnage) ; uniquement s'il est déclaré dans `fixed` |
+| `generator` | `Generator` | `fixed` | réserve de modèles dont on tire des copies (voir § Générateur) ; uniquement s'il est déclaré dans `fixed` |
 
 Un `kind` inconnu est ignoré sans erreur.
 
@@ -220,7 +234,7 @@ est notre **`Token`**, et son `CounterBox` est notre **`Counter`**.
    dans `handleServerMessage` de `game.ts`.
 
 Actions actuelles : `list_sessions`, `create_session`, `join_session`,
-`resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `pick`, `move`,
+`resume_session`, `close_session`, `start_session`, `list_game`, `acquire`, `release`, `pick`, `generate`, `move`,
 `draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
@@ -591,6 +605,43 @@ directement dans la main du joueur.
   tout autre `kind` est ignoré, comme un sac déclaré ailleurs que dans `fixed`.
 - `duplicate_component_ids` compte l'`id` du sac et ceux de ses pions.
 
+## Générateur (`generator`)
+
+Un `generator` est un composant `fixed` qui liste des **modèles** (des `token`
+ou des `card`, décrits sans `x`/`y`) et en donne des copies à volonté. Il n'est
+pas dessiné sur la table : Raffaillac montre ses modèles dans une colonne à
+gauche des participants, chacun sur la face de son `side`.
+
+```json
+{"kind": "generator", "id": "supply", "components": [
+  {"kind": "token", "id": "marker", "width": 40, "height": 40,
+   "front_src": "...", "back_src": "...", "side": "back"}]}
+```
+
+- Les modèles ne sont **pas** des composants : ni dans `components_dict`, ni
+  dans `duplicate_component_ids`. Tout autre `kind` que `token` / `card`, ou un
+  modèle sans `id`, est ignoré (`read_models`). Chaque modèle est construit une
+  fois à la construction de la session (`build_generator`) : mal décrit, il
+  lève `InvalidComponentError` (`parent_id` = le générateur).
+- `generate` (`Session.generate`) : mêmes conditions que `pick`
+  (`acquire_refusal`, joueurs seulement), plus la nationalité du modèle.
+  Erreurs : `component_not_a_generator`, `unknown_model`, `wrong_nationality`,
+  `missing_field` (`model_id`). La copie prend l'id `<modèle>-<n>`
+  (`Generator.next_id`) : `n` part de 1, n'est jamais réutilisé (même après
+  destruction), et un id déjà pris dans `components_dict` est sauté. Elle
+  entre en fin de `movable`, centrée sur `x`/`y`, sans case de départ, acquise
+  par l'appelant ; l'événement `generate` porte `request_id` et sa description.
+- Destruction : `release` avec `"generator": true` (le client l'envoie quand
+  le bouton remonte au-dessus de la colonne). Si le pion est une copie encore
+  en jeu d'un générateur (`generator_of`, liste `created`), il quitte
+  `movable` et `components_dict` (`destroy_copy`) et l'événement porte
+  `generator_id`. Tout autre pion est posé comme un `release` ordinaire.
+- `return_json` n'envoie de chaque modèle que la face qu'il montre ;
+  `state_json` garde les deux, plus `generated` (`{modèle: dernier n}`) et
+  `created` (ids des copies en jeu), relus à la reprise. Un modèle de carte
+  ou à nationalité met `hides_faces` à vrai : `for_user` filtre ses copies.
+- `anonymous_id` ne renomme pas les copies. Tests : `tests/test_generator.py`.
+
 ## Salon audio (`voice`)
 
 Les joueurs d'une session se parlent par **WebRTC**, de navigateur à
@@ -628,15 +679,18 @@ dans toute partie ; les spectateurs n'y entrent pas (`watcher_not_allowed`).
 ## Chat (`chat`)
 
 Chat texte de la session (`chat.py`, `ChatHistory`) : un **canal général**
-lu et écrit par tous (joueurs et spectateurs), et un **canal privé par paire
-de joueurs**, que ces deux seuls lisent. Aucune option de jeu.
+lu par tous mais écrit par les **joueurs seuls** (un spectateur lit sans
+écrire : `watcher_cannot_chat`, décision de l'utilisateur du 21/10/2026), et
+un **canal privé par paire de joueurs**, que ces deux seuls lisent. Aucune
+option de jeu.
 
 - Message : `{id, from, to, text, time}` ; `to` vaut `null` sur le canal
   général, le pseudo de l'autre joueur sur un canal privé. `id` croît avec
   chaque message de la session, tous canaux confondus ; `time` en ISO 8601 UTC.
-- `chat_send` `{text, to?}` : `text` est nettoyé de ses blancs, 1 à
-  `MAX_TEXT_LENGTH` (500) caractères (`invalid_chat_text`). Avec `to`, seul un
-  joueur écrit, à un autre siège de la partie, connecté ou non
+- `chat_send` `{text, to?}` : refusé à un spectateur (`watcher_cannot_chat`) ;
+  `text` est nettoyé de ses blancs, 1 à
+  `MAX_TEXT_LENGTH` (500) caractères (`invalid_chat_text`). Avec `to`, à un
+  autre siège de la partie, connecté ou non
   (`Session.chat_partner`, sinon `unknown_player`). `Session.post_chat`
   envoie l'événement `chat` à tous (général) ou aux connexions des deux
   joueurs (privé), par `user.send`, sans `for_user`.
@@ -952,6 +1006,44 @@ cases de chaque côté : `left` et `right`, chacune `{icon, boxes}`.
   (`take_from_character`) ; erreurs `wrong_nationality`, `character_empty`.
   Une carte sous un personnage est hors d'atteinte : `refuse_modification` →
   `component_under_character`, et un randomizer `id_list` l'ignore.
+
+## Test de charge (`loadtest.py`)
+
+Demandé par l'utilisateur le 21/10/2026 : à partir de combien de tables
+simultanées le serveur atteint ses limites. Client seul (il n'importe rien du
+serveur), venv `/root/.venvs/obg-loadtest` (`websockets`).
+
+```bash
+/root/.venvs/obg-loadtest/bin/python loadtest.py --steps 5,10,20 --step-seconds 40
+/root/.venvs/obg-loadtest/bin/python loadtest.py --url wss://www.chabanas.ovh/obg/ws --stats ssh --report r.json
+```
+
+- Tables ajoutées par paliers (`--steps`, `--step-seconds`), Waterloo
+  (2 sièges, nationalités `french` / `angloallies`) et Sherlock Holmes
+  (`--players`, 3 par défaut) en alternance. Création comme la page :
+  `variant_name: "default"`, `access_key: ""` (sinon Chabanas répond 404 ou
+  plante sur la contrainte NOT NULL), nationalité pour les wargames.
+- Chaque bot, au rythme d'un humain (`--think-min/max`, 2 à 5 s) : glisser un
+  pion ou une carte de sa nationalité (`acquire`, un `move` par image pendant
+  `--drag-seconds` à `--drag-hz` = 60, comme `flushMoves` de la page,
+  `release`), piocher et poser une carte, lancer le dé, retourner un pion,
+  écrire dans le chat. Chaque action attend l'événement qui lui répond : sa
+  latence est mesurée (un `move` par glissé est chronométré sur son écho).
+- Un palier est tenu si 95 % des réponses arrivent sous `--max-p95` (1 s), si
+  les échecs (sans réponse en 10 s, erreurs) restent sous `--max-failures`
+  (2 %) et sans déconnexion ; le test s'arrête au premier palier non tenu.
+  Refus normaux du jeu, non comptés comme échecs : dé en recharge, pile vide,
+  pion déjà tenu.
+- Processeur et mémoire des conteneurs lus en parallèle, en lecture seule :
+  `docker stats` local (`--stats local`) ou sur le serveur par ssh
+  (`--stats ssh`).
+- Pseudos `loadtest_<table>_<siège>` (`--prefix`) ; à la fin, chaque table est
+  fermée (`close_session` : session archivée dans Chabanas, pas supprimée ;
+  `--keep` pour les laisser ouvertes).
+- Mesure locale du 21/10/2026 (PC, entraînement des bots en parallèle) :
+  20 tables / 50 bots tenues, médiane 2 ms, 95 % sous 45 ms (le `release`, qui
+  cherche case, pile et sac, est l'action la plus lente), Tourtoirac à 17 %
+  d'un cœur, 1 400 messages reçus par seconde.
 
 ## Joueurs simulés (`bots/`, `sherlock_bot.py`)
 

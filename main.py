@@ -8,11 +8,11 @@ from autobahn.twisted.websocket import (
     listenWS,
 )
 from autobahn.websocket.protocol import WebSocketProtocol
-from twisted.internet import reactor
+from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, take, give, voice_join, voice_leave, voice_signal, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, view, follow
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, view, follow
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # attente de Chabanas au demarrage : 30 tentatives espacees de 2 s
 CHABANAS_MAX_RETRIES = 30
 CHABANAS_RETRY_INTERVAL = 2.0
+# seconds between two checks of the games in progress counted by Chabanas
+OCCUPANCY_CHECK_INTERVAL = 3600
 
 class GameWebSocketProtocol(WebSocketServerProtocol):
     def onConnect(self, request):
@@ -101,6 +103,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 release(self, self.factory.lobby.logger, message)
             case "pick": # a player takes a random token out of a bag
                 pick(self, self.factory.lobby.logger, message)
+            case "generate": # a player drags a new copy out of a generator
+                generate(self, self.factory.lobby.logger, message)
             case "take": # a player plays a token of its private hand
                 take(self, self.factory.lobby.logger, message)
             case "draw": # a player takes the top card of a pile of a deck
@@ -254,6 +258,14 @@ def start_server(lobby):
         lobby.shutdown
     )
     logger.info("[SERVER] Shutdown handler registered")
+
+    # the games in progress are counted by Chabanas in real time; it is told
+    # at start (nothing yet) and every hour which ones really have players, and
+    # corrects its count when it missed something
+    occupancy_check = task.LoopingCall(lobby.sync_occupancy)
+    occupancy_check.start(OCCUPANCY_CHECK_INTERVAL, now=True).addErrback(
+        lambda failure: logger.error(f"[SERVER] Hourly check of the games in progress stopped: {failure}")
+    )
 
 
 def main():
