@@ -712,7 +712,8 @@ def give(self, logger, message):
 def resolve_voice_action(self, action):
     """
     Shared preamble of the voice actions (voice_join, voice_leave,
-    voice_signal): only a player of a session talks.
+    voice_signal): only a player of a session talks, or a watcher the owner
+    allowed to (voice_allow).
     Returns the user when the action can proceed, or None when an error has
     already been sent to the client.
     """
@@ -731,10 +732,10 @@ def resolve_voice_action(self, action):
         )
         return None
 
-    if user.role != "player":
+    if action != "voice_leave" and not user.session.may_talk(user):
         self.send_error(
             "watcher_not_allowed",
-            "Only players can talk"
+            "Only players, and the watchers the owner allowed, can talk"
         )
         return None
 
@@ -810,6 +811,53 @@ def voice_signal(self, logger, message):
         return
 
     target.send({"event": "voice_signal", "from": user.name, "data": data})
+
+
+def voice_allow(self, logger, message):
+    """
+    The owner of the session lets a watcher talk in the voice channel
+    ("allowed": true), or takes it back ("allowed": false): the watcher then
+    leaves the channel and can no longer join it. Every screen gets the new
+    list of participants with a session_status, where each watcher says
+    whether it may talk ("voice").
+    """
+    logger.debug("Process voice_allow message")
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+
+    session = user.session
+    if session is None:
+        self.send_error(
+            "no_session",
+            "The voice_allow action requires an active session"
+        )
+        return
+
+    if not session.is_owner(user):
+        self.send_error(
+            "not_session_owner",
+            "Only the owner of the session lets a watcher talk"
+        )
+        return
+
+    allowed = message.get("allowed")
+    if not isinstance(allowed, bool):
+        self.send_error("invalid_message", "The voice_allow message requires allowed, true or false")
+        return
+
+    ok, left = session.allow_voice(message.get("nickname"), allowed)
+    if not ok:
+        self.send_error(
+            "unknown_watcher",
+            "The voice_allow message requires the nickname of a watcher of the session"
+        )
+        return
+
+    session.send(session.return_status_json())
+    if left:
+        session.send_voice_members()
 
 
 def chat_send(self, logger, message):

@@ -691,6 +691,30 @@ class TestResumeAfterTheLobbyIsLeft:
         assert lobby.sessions[host.session.key] is host.session
 
 
+    def test_a_store_ending_while_the_player_is_admitted_does_not_drop_it(self, lobby, sync, session_info):
+        """
+        Admitting the player waits for Chabanas: the state stored when the
+        lobby page left may end meanwhile and drop the still empty session. The
+        player must end up in the session of the lobby, or starting the game
+        is refused (no_session).
+        """
+        host = connect(lobby, "alice")
+        sync(lobby.create_session("Waterloo", host, ""))
+        session = host.session
+        session.remove_user(host)           # the lobby page left, the store is in flight
+
+        def admit_while_the_store_ends(admitted):
+            lobby._remove_session_if_still_empty(admitted)
+            return defer.succeed(True)
+
+        lobby._admit_player = admit_while_the_store_ends
+        resumer = connect(lobby, "alice")
+        success, _ = sync(lobby.resume_session(session_info["key"], resumer, "player", session_info["code"]))
+
+        assert success is True
+        assert lobby.sessions[session_info["key"]] is resumer.session is session
+
+
 class TestLaunchIsDated:
     """Every player launching the game dates the launch in Chabanas."""
 

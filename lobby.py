@@ -264,6 +264,7 @@ class Lobby:
                 self._forget_if_unused(session)
                 return False, "server_full"
 
+        session = self._kept_in_memory(session)
         success, reason = session.add_user(user, role)
         if not success:
             self._release_if_empty(session)
@@ -333,6 +334,7 @@ class Lobby:
                 self._forget_if_unused(session)
                 return False, "server_full"
 
+        session = self._kept_in_memory(session)
         success, reason = session.add_user(user, role)
         if not success:
             self._release_if_empty(session)
@@ -344,6 +346,24 @@ class Lobby:
         self._notify_lobby_users("join", session, user)
         self._send_status(session)
         return True, None
+
+    def _kept_in_memory(self, session: Session) -> Session:
+        """
+        The session a user is about to enter, back in the lobby if it left it.
+        Admitting a player waits for Chabanas (occupy_game): meanwhile the state
+        of the session, stored when its last participant left (the page going
+        from the lobby to the game), may come back and drop it from memory, as
+        it is still empty. The user would then enter a session the lobby no
+        longer knows, and its next action would be refused (no_session).
+        :return: the session of the lobby under that key: this one, put back,
+            or the one a concurrent resume rebuilt meanwhile
+        """
+        current = self.sessions.get(session.key)
+        if current is None:
+            self.logger.debug(f"[SESSION] {session.key} dropped while a user was entering it: kept in memory")
+            self.add_session(session)
+            return session
+        return current
 
     def _record_launch(self, session: Session):
         """

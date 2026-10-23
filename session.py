@@ -513,6 +513,13 @@ class Session:
             if isinstance(name, str)
         ]
         self.remember_player_order(self.player_names)
+        # the watchers the owner allowed to talk in the voice channel, by
+        # nickname (voice_allow). Saved with the state (voice_speakers).
+        saved_speakers = game_json.get('voice_speakers')
+        self.voice_speakers = [
+            name for name in (saved_speakers if isinstance(saved_speakers, list) else [])
+            if isinstance(name, str)
+        ]
         # nationalities: the sides the game declares, empty for a game without
         # any. No rule depends on them yet: they are only carried to the clients.
         self.nationalities = read_nationalities(game_json)
@@ -1635,6 +1642,10 @@ class Session:
         state.pop('player_order', None)
         if self.player_order:
             state['player_order'] = list(self.player_order)
+        # so do the watchers allowed to talk
+        state.pop('voice_speakers', None)
+        if self.voice_speakers:
+            state['voice_speakers'] = list(self.voice_speakers)
         # the icon each player got survives the session too
         state.pop('player_icon_of', None)
         if self.player_icon_of:
@@ -1883,7 +1894,8 @@ class Session:
         seats first, connected or not, then the watchers.
         :return: a list of {"nickname", "role", "connected", "icon"}; role is
             "player" or "watcher", and a watcher is always connected; icon is
-            the image of a player (player_icons), None for anybody without one
+            the image of a player (player_icons), None for anybody without one.
+            A watcher also has "voice": whether the owner allowed it to talk
         """
         connected = [user.name for user in self.players]
         watching = [user.name for user in self.watchers]
@@ -1899,7 +1911,8 @@ class Session:
         for name in watching:
             if self.closed and name in seats:
                 continue
-            listed.append({"nickname": name, "role": "watcher", "connected": True, "icon": None})
+            listed.append({"nickname": name, "role": "watcher", "connected": True, "icon": None,
+                           "voice": name in self.voice_speakers})
         return listed
 
     def acquire_refusal(self) -> str | None:
@@ -2028,6 +2041,31 @@ class Session:
             self.watchers.remove(user)
         if self.leave_voice(user):
             self.send_voice_members()
+
+    def may_talk(self, user) -> bool:
+        """
+        A player talks in the voice channel; a watcher only once the owner
+        allowed it (voice_allow).
+        """
+        return user.role == "player" or (user.role == "watcher" and user.name in self.voice_speakers)
+
+    def allow_voice(self, nickname, allowed: bool) -> tuple:
+        """
+        The owner lets a watcher talk, or takes it back: the watcher then
+        leaves the voice channel, if it was in it.
+        :return: (ok, left): ok is False when nickname is no watcher of the
+            session; left tells whether the voice channel changed
+        """
+        watcher = next((user for user in self.watchers if user.name == nickname), None)
+        if watcher is None or (self.closed and nickname in self.player_names):
+            return False, False
+        if allowed:
+            if nickname not in self.voice_speakers:
+                self.voice_speakers.append(nickname)
+            return True, False
+        if nickname in self.voice_speakers:
+            self.voice_speakers.remove(nickname)
+        return True, self.leave_voice(watcher)
 
     def voice_members(self) -> list:
         """

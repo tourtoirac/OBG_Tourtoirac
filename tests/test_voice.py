@@ -6,7 +6,7 @@ import base64
 import hashlib
 import hmac
 
-from handle_message import voice_join, voice_leave, voice_signal
+from handle_message import voice_allow, voice_join, voice_leave, voice_signal
 from session import Session
 from tests.test_bag import LOGGER, FakeProtocol, FakeUser, error_codes
 from voice import ice_servers, turn_credentials
@@ -80,6 +80,67 @@ class TestJoining:
         (alice, _), _, dave = table(session)
         ask(voice_join, alice)
         assert session.return_session_json(dave)["voice"] == ["alice"]
+
+
+
+class TestWatcherAllowedToTalk:
+    """The owner lets a watcher talk, and takes it back (voice_allow)."""
+
+    def owned(self):
+        session = build_session()
+        session.owner_nickname = "alice"
+        (alice, bob), (a, b), dave = table(session)
+        return session, alice, bob, dave
+
+    def test_only_the_owner_allows(self):
+        session, _, bob, dave = self.owned()
+        ask(voice_allow, bob, nickname="dave", allowed=True)
+        assert error_codes(bob) == ["not_session_owner"]
+        assert session.voice_speakers == []
+
+    def test_only_a_watcher_is_allowed(self):
+        session, alice, _, _ = self.owned()
+        ask(voice_allow, alice, nickname="bob", allowed=True)
+        ask(voice_allow, alice, nickname="dave", allowed="yes")
+        assert error_codes(alice) == ["unknown_watcher", "invalid_message"]
+
+    def test_an_allowed_watcher_talks(self):
+        session, alice, _, dave = self.owned()
+        ask(voice_allow, alice, nickname="dave", allowed=True)
+        # every screen is told, the watcher included
+        status = events(dave, "session_status")[-1]
+        assert [p for p in status["participants"] if p["nickname"] == "dave"][0]["voice"] is True
+        watcher = FakeProtocol(dave)
+        ask(voice_join, alice)
+        ask(voice_join, watcher)
+        assert error_codes(watcher) == []
+        assert events(dave, "voice_joined")[-1]["peers"] == ["alice"]
+        ask(voice_signal, watcher, to="alice", data={"candidate": {}})
+        assert error_codes(watcher) == []
+
+    def test_taking_it_back_hangs_up(self):
+        session, alice, _, dave = self.owned()
+        watcher = FakeProtocol(dave)
+        ask(voice_allow, alice, nickname="dave", allowed=True)
+        ask(voice_join, watcher)
+        ask(voice_allow, alice, nickname="dave", allowed=False)
+        assert session.voice_members() == []
+        assert events(alice.user, "voice_members")[-1]["members"] == []
+        assert [p for p in events(dave, "session_status")[-1]["participants"]
+                if p["nickname"] == "dave"][0]["voice"] is False
+        # it can no longer emit nor come back
+        ask(voice_signal, watcher, to="alice", data={"candidate": {}})
+        ask(voice_join, watcher)
+        assert error_codes(watcher) == ["watcher_not_allowed", "watcher_not_allowed"]
+
+    def test_the_permission_is_saved(self):
+        session, alice, _, _ = self.owned()
+        ask(voice_allow, alice, nickname="dave", allowed=True)
+        game_json = {"game": {"max_players": 3, "max_watchers": 2}, "fixed": [], "movable": [], "options": {},
+                     "voice_speakers": session.voice_speakers}
+        again = Session(user=None, name="Waterloo", key="KEY1", code="CODE1", active=True, variant="std",
+                        game_json=game_json, started=True)
+        assert again.voice_speakers == ["dave"]
 
 
 class TestLeaving:

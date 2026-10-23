@@ -15,7 +15,11 @@ def build_session(**extra):
 
 
 def line(nickname, role, connected=True, icon=None):
-    return {"nickname": nickname, "role": role, "connected": connected, "icon": icon}
+    entry = {"nickname": nickname, "role": role, "connected": connected, "icon": icon}
+    # a watcher also says whether the owner allowed it to talk (voice_allow)
+    if role == "watcher":
+        entry["voice"] = False
+    return entry
 
 
 class TestParticipants:

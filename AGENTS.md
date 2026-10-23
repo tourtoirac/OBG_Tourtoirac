@@ -114,6 +114,7 @@ leur attache un errback de journalisation.
 | `voice_join` | `voice_joined` `{peers, ice_servers}` à l'appelant, puis `voice_members` `{members}` | appelant, puis session |
 | `voice_leave` | `voice_members` `{members}` | session |
 | `voice_signal` `{to, data}` | `voice_signal` `{from, data}` | le seul destinataire |
+| `voice_allow` `{nickname, allowed}` (owner) | `session_status` (le spectateur porte `voice`), puis `voice_members` s'il a quitté le salon | session |
 | `chat_send` `{text, to?}` (joueurs seuls) | `chat` `{message}` | session (général) ou les deux joueurs (privé) |
 | `give` `{component_id, to}` | `give` `{component_id, nickname, to, user, hands, component_json}` | session |
 | `generate` `{component_id, model_id, x?, y?, request_id?}` | `generate` `{component_id, model_id, user, nickname, request_id, component_json}` | session |
@@ -238,7 +239,7 @@ Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `draw`, `shuffle`, `refill`, `deal`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
-`order_players`, `voice_join`, `voice_leave`, `voice_signal`, `chat_send`,
+`order_players`, `voice_join`, `voice_leave`, `voice_signal`, `voice_allow`, `chat_send`,
 `view`, `follow`.
 
 ## Configuration
@@ -648,7 +649,18 @@ Les joueurs d'une session se parlent par **WebRTC**, de navigateur à
 navigateur (maillage complet : une connexion par paire). **Le son ne passe
 jamais par Tourtoirac** : il ne fait que relayer les messages de mise en
 relation et dire qui est dans le salon. Aucune option de jeu : le salon existe
-dans toute partie ; les spectateurs n'y entrent pas (`watcher_not_allowed`).
+dans toute partie ; un spectateur n'y entre (`watcher_not_allowed`) que si
+l'owner l'y autorise (demande de l'utilisateur du 23/10/2026).
+
+- `voice_allow` `{nickname, allowed}` (owner seul : `not_session_owner`) :
+  `allowed` booléen (`invalid_message`), `nickname` un spectateur présent de
+  la session (`unknown_watcher` ; pas un joueur d'une partie close).
+  `Session.voice_speakers` (pseudos) **sauvegardé** dans l'état
+  (`voice_speakers`, comme `player_order`). Chaque spectateur de
+  `participants()` porte `voice` ; un `session_status` est diffusé. Retirer
+  l'autorisation sort le spectateur du salon (`voice_members`) : il ne peut
+  plus émettre (`voice_not_joined`) ni revenir. `Session.may_talk` est le
+  contrôle de `voice_join` et `voice_signal`.
 
 - `Session.voice` : `[User]`, une entrée par connexion, dans l'ordre
   d'arrivée. **Jamais sauvegardé.** `voice_members()` en donne les pseudos,
