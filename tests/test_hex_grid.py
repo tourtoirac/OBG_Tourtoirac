@@ -311,6 +311,25 @@ class TestRelease:
         token = release_at(1053 - 15, 2064 - 15, magnetism=False)
         assert (token.x, token.y) == (1053 - 15, 2064 - 15)
 
+    def test_a_marker_that_ignores_magnetism_stays_where_dropped(self):
+        token = release_at(1053 - 15, 2064 - 15, ignore_magnetism=True)
+        assert (token.x, token.y) == (1053 - 15, 2064 - 15)
+        assert token.return_json()["ignore_magnetism"] is True
+
+    @pytest.mark.parametrize("value", [False, None, "true", 1])
+    def test_only_true_ignores_magnetism(self, value):
+        token = release_at(1053 - 15, 2064 - 15, ignore_magnetism=value)
+        assert center(token) == pytest.approx((1050, 2060))
+
+    def test_ignore_magnetism_survives_the_saved_state(self):
+        session = build_session(ignore_magnetism=True)
+        saved = session.game_json_state()
+        resumed = Session(
+            user=None, name="Vietnam", key="KEY1", code="CODE1",
+            active=True, variant="std", game_json=saved,
+        )
+        assert resumed.get_component("token").ignore_magnetism is True
+
     def test_a_token_dropped_off_the_grid_board_stays_put(self):
         token = release_at(200, 300)
         assert (token.x, token.y) == (200, 300)

@@ -132,6 +132,7 @@ leur attache un errback de journalisation.
 | `flip` | `flip` `{side, front_src, back_src}` | session |
 | `increment` / `decrement` | `counter_value` `{value}` | session |
 | `mark` `{component_id, column, index}` | `mark` `{component_id, column, index, value, nickname}` | session |
+| `choose` `{component_id, choice}`, `validate_choice` `{component_id}`, `reveal_choice` `{component_id}` | `secret_choice` `{component_id, action, nickname, component_json}` ; `choice` vaut `null` pour qui ne doit pas la connaître | session |
 | `fix_positions` | `fix_positions` `{components}` | session |
 | `order_players` `{nicknames}` (owner seulement) | `session_status` | session |
 | `view` `{x, y}` (joueur seulement) | `view` `{nickname, x, y}` | ceux qui suivent ce joueur |
@@ -141,6 +142,24 @@ leur attache un errback de journalisation.
 | (arrêt du réacteur) | `server_shutdown` | tous |
 
 Le client attend aussi `session_created`, que le serveur n'émet jamais.
+
+### Administration d'OBG (`admin_api.py`)
+
+API HTTP interne, port 9001 (jamais publié), démarrée par `start_server`
+seulement quand `OBG_ADMIN_SECRET` est défini ; chaque requête porte ce
+secret dans `X-OBG-Admin-Secret`. Seul client : les pages `manage/` de
+Chabanas.
+
+| Route | Effet |
+| ----- | ----- |
+| `GET /admin/presence` | `{sessions: Lobby.presence()}` : qui est connecté à chaque session en mémoire (`admins` à part) |
+| `POST /admin/close {key}` | `Lobby.admin_close` → `close_session(by_admin=True)` : `session_closed {by_admin: true}` ; `{handled: false}` si la session n'est pas en mémoire (Chabanas l'archive seul), 502 si la clôture est refusée |
+| `POST /admin/delete {key}` | `Lobby.admin_delete` : `session_deleted` à tous, chacun sorti de la session, session retirée de la mémoire **sans** stockage, `vacate` |
+
+`resume_session` accepte `role: "admin"` : un spectateur (`User.admin`)
+qui passe outre `max_watchers` et ne remplace jamais un participant de même
+pseudo (`nickname_connected`). La clé de session, que seule l'administration
+lui donne, suffit, comme pour tout `resume_session`. Tests : `tests/test_admin.py`.
 
 ### Cycle de vie d'une session
 
@@ -199,7 +218,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
 ### Composants réellement chargés
 
-`Session.load_session_components` ne reconnaît que treize `kind` :
+`Session.load_session_components` ne reconnaît que quatorze `kind` :
 
 | `kind` | Classe | Liste | Remarque |
 | ------ | ------ | ----- | -------- |
@@ -215,6 +234,7 @@ Le client attend aussi `session_created`, que le serveur n'émet jamais.
 | `slot` | `Slot` | `fixed` | sous-classe de `Deck` à une seule pile où les cartes gardent leur face (voir § Emplacement de cartes) ; uniquement s'il est déclaré dans `fixed` |
 | `card` | `Card` | `movable` | carte, sous-classe de `Token` ; uniquement dans `movable` (ou dans un `deck` / `stack`) |
 | `mw_character` | `MwCharacter` | `fixed` | carte immobile à deux colonnes de cases (voir § Personnage) ; uniquement s'il est déclaré dans `fixed` |
+| `secret_choice` | `SecretChoice` | `fixed` | valeur choisie en secret par un camp, validée puis révélée (voir § Choix secret) ; uniquement s'il est déclaré dans `fixed` |
 | `generator` | `Generator` | `fixed` | réserve de modèles dont on tire des copies (voir § Générateur) ; uniquement s'il est déclaré dans `fixed` |
 
 Un `kind` inconnu est ignoré sans erreur.
@@ -240,7 +260,7 @@ Actions actuelles : `list_sessions`, `create_session`, `join_session`,
 `roll`, `roll_pool`, `rotate`, `flip`, `fix_positions`, `apply_setup`, `increment`,
 `decrement`, `take`, `give`, `show_open`, `show_add`, `show_remove`, `show_close`,
 `order_players`, `voice_join`, `voice_leave`, `voice_signal`, `voice_allow`, `chat_send`,
-`view`, `follow`.
+`mark`, `choose`, `validate_choice`, `reveal_choice`, `view`, `follow`.
 
 ## Configuration
 
@@ -289,14 +309,20 @@ par là plutôt que par une logique de face séparée.
 
 Notion **facultative** : un `game_json` peut déclarer, **dans ses `options`**,
 `"nationalities": ["US", "NVA"]` (la clé n'est pas lue à la racine), et un `token` peut porter
-`"nationality": "US"`. Un `token` peut aussi porter `"block_sight": true`
+`"nationality": ["US", "ARVN"]` : la **liste** des camps auxquels il appartient
+(depuis le 25/10/2026 ; migration Chabanas `0010_nationality_list`). Un texte
+seul, ancien format, est lu comme une liste d'un (`component.read_nationality`) ;
+la valeur relue et renvoyée est toujours une liste, ou `None`. Même clé et même
+lecture pour `card`, `mw_character`, `secret_choice` et les modèles d'un
+`generator` ; `component.nationality_allows(nationality, user)` dit si le camp
+du joueur est dans la liste. Un `token` peut aussi porter `"block_sight": true`
 (seul le booléen `true` compte) : `Token.block_sight` est transmis tel quel au
 client par `return_json`, qui s'en sert pour masquer, dans l'aperçu de pile,
 les pions situés dessous aux autres nationalités et aux spectateurs. Le serveur
 n'applique aucune règle dessus.
 
-**Seule règle pour l'instant** : un pion qui porte une nationalité n'est touché
-que par un joueur de cette nationalité (`Component.acquirable_by`, redéfini par
+**Seule règle pour l'instant** : un pion qui porte des nationalités n'est touché
+que par un joueur de l'une d'elles (`Component.acquirable_by`, redéfini par
 `Token`). `acquire`, `rotate` et `flip` répondent sinon par l'erreur
 `wrong_nationality`, sans rien diffuser. `pick` ne tire que parmi les pions du sac que le joueur
 peut prendre (`Bag.pick(user)`) ; s'il n'en reste que d'autres nationalités,
@@ -331,7 +357,7 @@ session, puis tirage parmi les pions que le joueur peut prendre).
   pas la connexion. Un spectateur a `None`.
 - `return_session_json` renvoie `nationalities` et `player_nationalities` ;
   `session_joined` renvoie celle de l'appelant.
-- `Token.nationality` (`None` si absente ou mal écrite) est renvoyée par
+- `Token.nationality` (liste, `None` si absente, vide ou mal écrite) est renvoyée par
   `return_json` : elle survit à la sauvegarde. `session.read_nationalities`
   fait la même lecture que `Chabanas/Game/tools.py`.
 - `Chabanas.create_session` renvoie désormais `(session_info, reason)`, comme
@@ -478,6 +504,11 @@ groupe (ou s'il ne vaut pas le booléen `true`), et pour un plateau seul, la
 grille n'aimante rien : elle ne sert qu'à l'affichage de calibrage (touche G de
 Raffaillac). Un `board` n'a plus de clé `magnetism` (ni lue, ni sauvegardée) :
 `Board.snap_point` lit `board.group.magnetism`.
+
+Un `token` qui porte `"ignore_magnetism": true` (seul le booléen compte ;
+absent, faux) n'est jamais aimanté : `Session.snap_to_grid` le laisse là où il
+est lâché. Pour les marqueurs (tour, victoire...) posés sur une carte à
+hexagones. Transmis et sauvegardé par `Token.return_json`.
 
 ```json
 "grid": {"type": "hex", "orientation": "flat", "origin_x": 112.5,
@@ -1019,6 +1050,28 @@ cases de chaque côté : `left` et `right`, chacune `{icon, boxes}`.
   Une carte sous un personnage est hors d'atteinte : `refuse_modification` →
   `component_under_character`, et un randomizer `id_list` l'ignore.
 
+## Choix secret (`secret_choice`)
+
+`Components/secret_choice.py`, tests `tests/test_secret_choice.py`. Ajouté le
+25/10/2026 pour la lettre Shadow Points de War of the Ring (règles D.3, D.6,
+I) : une tuile **immobile** de `fixed` où les joueurs d'un camp choisissent
+une valeur de `choices`, la valident, puis la révèlent. Le jeu en pose une
+par tour (`shadow_letter_01` à `_20`, sous la piste des tours).
+- `choose {component_id, choice}` : permis tant que la valeur n'est pas
+  validée. `validate_choice` exige un choix non validé, `reveal_choice` un
+  choix validé non révélé. Une valeur révélée est définitive. Un refus
+  répond `<action>_refused`.
+- Erreurs : celles de `resolve_component_action`, `component_not_secret_choice`,
+  celles de `refuse_modification` (partie non lancée, joueur absent,
+  `wrong_nationality` via `acquirable_by`).
+- **Masquage** : `Session._without_hidden_faces` remplace `choice` par `null`
+  dans toute description `kind: "secret_choice"` non révélée, sauf pour un
+  joueur du camp (`nationality`, ou tout joueur sans camp). Spectateurs
+  compris. Un `SecretChoice` active `hides_faces`.
+- `return_json` envoie et sauvegarde `choice`, `validated`, `revealed` ; le
+  constructeur nettoie un état incohérent (choix inconnu, validé sans choix,
+  révélé sans validation).
+
 ## Test de charge (`loadtest.py`)
 
 Demandé par l'utilisateur le 21/10/2026 : à partir de combien de tables
@@ -1171,3 +1224,12 @@ python3 sherlock_bot.py --code ABCD1234 --bots 2  # bots rejoignant des humains
   Le lire avant de toucher à ce fichier — une connaissance qui n'est pas
   ailleurs.
 - `README.md` documente la stratégie de tests ; s'y référer avant d'en ajouter.
+
+## Configurable piece rotation
+
+`token` and `card` accept `rotation_step` in their `game_json` description:
+positive integer divisor of 360, default 45 (also for invalid values).
+`Session.build_token` / `build_card` pass it to `Token`, which validates and
+saves it; `handle_message.rotate` applies the piece's step to the requested
+left/right direction. Clients still send only the direction, never an angle.
+Aboukir ships and wind use 60. Tests: `tests/test_rotation_step.py`.

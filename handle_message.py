@@ -3,17 +3,16 @@ import math
 
 from twisted.internet import defer
 
+from Components.component import nationality_allows, read_nationality
 from Components.deck import Deck
-from Components.token import ROTATION_STEP
 from session import MOVABLE_KINDS
 from chat import MAX_TEXT_LENGTH, read_text
 from voice import MAX_SIGNAL_SIZE, ice_servers
 
-# Un cran de rotation vaut ROTATION_STEP degres. Le client clique une zone et
-# dit de quel bord il tourne ; il ne peut pas choisir l'angle.
+# Clients choose a direction; the piece defines the rotation increment.
 ROTATE_DIRECTIONS = {
-    "right": ROTATION_STEP,
-    "left": -ROTATION_STEP,
+    "right": 1,
+    "left": -1,
 }
 
 @defer.inlineCallbacks
@@ -444,7 +443,7 @@ def refuse_modification(self, user, component) -> bool:
     if not component.acquirable_by(user):
         self.send_error(
             "wrong_nationality",
-            f"Component {component.id} belongs to {component.nationality}"
+            f"Component {component.id} belongs to {', '.join(component.nationality)}"
         )
         return True
 
@@ -1232,11 +1231,11 @@ def generate(self, logger, message):
 
     # a model that belongs to a nationality is only copied by a player of
     # that nationality, as its copies are only touched by them
-    nationality = model.get('nationality')
-    if isinstance(nationality, str) and nationality and getattr(user, 'nationality', None) != nationality:
+    nationality = read_nationality(model.get('nationality'))
+    if not nationality_allows(nationality, user):
         self.send_error(
             "wrong_nationality",
-            f"Model {model_id} belongs to {nationality}"
+            f"Model {model_id} belongs to {', '.join(nationality)}"
         )
         return
 
@@ -1266,7 +1265,7 @@ def pick_from_character(self, user, character, message, request_id):
     if not character.acquirable_by(user):
         self.send_error(
             "wrong_nationality",
-            f"Component {character.id} belongs to {character.nationality}"
+            f"Component {character.id} belongs to {', '.join(character.nationality)}"
         )
         return
     card = user.session.take_from_character(character, user, message.get("x"), message.get("y"))
@@ -1585,8 +1584,7 @@ def roll_pool(self, logger, message):
 
 def rotate(self, logger, message):
     """
-    Fait pivoter un jeton d'un cran. Le client n'envoie que le sens du clic :
-    c'est le serveur qui compte de combien ca tourne, et qui normalise l'angle.
+    Rotate a piece by its configured step; clients supply only a direction.
     """
     logger.debug("Process rotate message")
     user, component, ready = resolve_component_action(
@@ -1629,7 +1627,8 @@ def rotate(self, logger, message):
         )
         return
 
-    orientation = component.rotate(ROTATE_DIRECTIONS[direction])
+    # The component chooses the step; clients still send only a direction.
+    orientation = component.rotate(component.rotation_step * ROTATE_DIRECTIONS[direction])
     # l'angle est diffuse a tous, joueurs comme spectateurs : chaque ecran
     # affiche le meme pion, dans le meme sens
     user.session.send({
@@ -1750,6 +1749,67 @@ def mark(self, logger, message):
         # who did it, by nickname: the user id alone names a connection
         "nickname": user.name,
     })
+
+
+def change_secret_choice(self, logger, message, action: str):
+    """
+    Plays a step of a secret_choice: choose a value, validate it, reveal it.
+    The server keeps the value and sends the new state to every screen; the
+    value itself only reaches the players who chose it until it is revealed
+    (Session.for_user).
+    """
+    logger.debug(f"Process {action} message")
+    required_fields = ["component_id", "choice"] if action == "choose" else ["component_id"]
+    user, component, ready = resolve_component_action(self, message, action, required_fields)
+    if not ready:
+        return
+
+    component_id = message["component_id"]
+    if getattr(component, 'kind', None) != 'secret_choice':
+        self.send_error(
+            "component_not_secret_choice",
+            f"Component {component_id} offers no secret choice"
+        )
+        return
+
+    # the same rules as a flip: the game must be on, and only the players of
+    # its nationality choose
+    if refuse_modification(self, user, component):
+        return
+
+    if action == "choose":
+        done = component.choose(message["choice"])
+    elif action == "validate_choice":
+        done = component.validate()
+    else:
+        done = component.reveal()
+    if not done:
+        self.send_error(
+            f"{action}_refused",
+            f"Component {component_id} does not allow {action} now"
+        )
+        return
+
+    user.session.send({
+        "event": "secret_choice",
+        "component_id": component_id,
+        "action": action,
+        # who did it, by nickname: the user id alone names a connection
+        "nickname": user.name,
+        "component_json": component.return_json(),
+    })
+
+
+def choose(self, logger, message):
+    change_secret_choice(self, logger, message, "choose")
+
+
+def validate_choice(self, logger, message):
+    change_secret_choice(self, logger, message, "validate_choice")
+
+
+def reveal_choice(self, logger, message):
+    change_secret_choice(self, logger, message, "reveal_choice")
 
 
 def flip(self, logger, message):

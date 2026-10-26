@@ -68,15 +68,49 @@ class TestReading:
 
 class TestTokens:
     def test_a_token_carries_its_nationality(self):
+        # a single name, as games wrote it before, is read as a list of one
         session = build_session()
-        assert session.get_component("army").nationality == "US"
+        assert session.get_component("army").nationality == ["US"]
         assert session.get_component("neutral").nationality is None
 
     def test_the_nationality_of_a_token_survives_a_save(self):
         state = json.loads(json.dumps(build_session().game_json_state()))
         resumed = build_session(state)
-        assert resumed.get_component("army").nationality == "US"
-        assert resumed.get_component("army").return_json()["nationality"] == "US"
+        assert resumed.get_component("army").nationality == ["US"]
+        assert resumed.get_component("army").return_json()["nationality"] == ["US"]
+
+    def test_a_list_of_nationalities_is_cleaned(self):
+        session = build_session({"movable": [dict(TOKEN, nationality=["US", "", 3, "US", " NVA "])]})
+        assert session.get_component("army").nationality == ["US", "NVA"]
+        session = build_session({"movable": [dict(TOKEN, nationality=[])]})
+        assert session.get_component("army").nationality is None
+
+    def test_a_token_of_several_nationalities_is_taken_by_each_of_them(self):
+        session = build_session({
+            "options": {"nationalities": ["US", "ARVN", "NVA"]},
+            "movable": [dict(TOKEN, nationality=["US", "ARVN"])],
+        }, started=True)
+        users = {name: FakeUser(name, session=session) for name in ("us", "arvn", "nva")}
+        users["us"].nationality, users["arvn"].nationality, users["nva"].nationality = "US", "ARVN", "NVA"
+        session.players = list(users.values())
+        token = session.get_component("army")
+        assert token.acquirable_by(users["us"]) and token.acquirable_by(users["arvn"])
+        assert not token.acquirable_by(users["nva"])
+        protocol = FakeProtocol(users["nva"])
+        call(acquire, protocol, "army")
+        assert error_codes(protocol) == ["wrong_nationality"]
+
+    def test_the_hidden_face_is_kept_for_every_listed_nationality(self):
+        token = dict(TOKEN, nationality=["US", "ARVN"], back_src="/back.png", side="back")
+        session = build_session({"options": {"nationalities": ["US", "ARVN", "NVA"]}, "movable": [token]})
+        readers = {}
+        for name, side in (("us", "US"), ("arvn", "ARVN"), ("nva", "NVA")):
+            readers[name] = FakeUser(name, session=session)
+            readers[name].nationality = side
+        def front(user):
+            return session.return_session_json(user)["components"]["movable"][0]["front_src"]
+        assert front(readers["us"]) == "/army.png" and front(readers["arvn"]) == "/army.png"
+        assert front(readers["nva"]) is None
 
     def test_a_nationality_that_is_not_a_name_is_ignored(self):
         session = build_session({"movable": [dict(TOKEN, nationality=3)]})

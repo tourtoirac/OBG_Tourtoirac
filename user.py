@@ -14,6 +14,8 @@ class User:
         self.nationality = None
         # the nickname of the player whose view this user follows, or None
         self.following = None
+        # an administrator of OBG (Chabanas /manage/ pages) watching the game
+        self.admin = False
 
     def return_user_json(self) -> dict:
         """

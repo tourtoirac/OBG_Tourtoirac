@@ -11,8 +11,9 @@ from autobahn.websocket.protocol import WebSocketProtocol
 from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
+from admin_api import start_admin_api
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, view, follow
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, choose, validate_choice, reveal_choice, view, follow
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -155,6 +156,12 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 decrement(self, self.factory.lobby.logger, message)
             case "mark": # a player marks a box of an mw_character, everyone sees it
                 mark(self, self.factory.lobby.logger, message)
+            case "choose": # a player chooses a value of a secret_choice, hidden from the others
+                choose(self, self.factory.lobby.logger, message)
+            case "validate_choice": # the chosen value is locked
+                validate_choice(self, self.factory.lobby.logger, message)
+            case "reveal_choice": # the chosen value is shown to everybody
+                reveal_choice(self, self.factory.lobby.logger, message)
             case "flip": # a player turns a counter over, everyone sees the new face
                 flip(self, self.factory.lobby.logger, message)
             case "fix_positions": # players restore the green border on the counters
@@ -251,6 +258,8 @@ def start_server(lobby):
     )
     listenWS(factory)
     logger.info("WebSocket server started on ws://0.0.0.0:9000")
+    # the Chabanas /manage/ pages: who is connected, closing or deleting a session
+    start_admin_api(reactor, lobby, logger)
 
     # Graceful shutdown : on SIGTERM/SIGINT, the Twisted reactor stops,
     # notify all users and disconnect them before the process exits

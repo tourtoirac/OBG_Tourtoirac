@@ -1,5 +1,32 @@
 from user import User
 
+
+def read_nationality(value):
+    """
+    Reads the nationality field of a component: the list of the sides it
+    belongs to. A single string, as games wrote it before, is read as a list
+    of one. Blank and non-string entries are dropped, duplicates kept once.
+    :return: a non-empty list of strings, or None when the component belongs
+        to every side
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return None
+    read = []
+    for item in value:
+        if isinstance(item, str) and item.strip() and item.strip() not in read:
+            read.append(item.strip())
+    return read or None
+
+
+def nationality_allows(nationality, user) -> bool:
+    """
+    Whether a component of that nationality (a list, or None) lets user touch
+    it: always without nationality, else when the side of user is listed.
+    """
+    return nationality is None or getattr(user, 'nationality', None) in nationality
+
 class Component:
     # basic object. Used to build other components
     def __init__(self, component_id):

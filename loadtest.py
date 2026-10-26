@@ -274,7 +274,7 @@ class Bot:
 
     def free_components(self) -> list[str]:
         return [cid for cid, c in self.movable.items()
-                if c["held"] is None and cid not in self.hand and c.get("nationality") in (None, self.nationality)]
+                if c["held"] is None and cid not in self.hand and (c.get("nationality") is None or self.nationality in c["nationality"])]
 
     async def drag(self) -> None:
         """Takes a token or a card lying on the table, drags it, puts it down."""

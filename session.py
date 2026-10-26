@@ -12,6 +12,7 @@ from Components.deck import Deck
 from Components.dice import Dice
 from Components.dice_pool import DicePool
 from Components.generator import Generator
+from Components.secret_choice import SecretChoice
 from Components.slot import Slot
 from Components.stack import Stack
 from Components.token import Token
@@ -572,6 +573,8 @@ class Session:
             or (isinstance(component, Token) and component.nationality is not None)
             # the copies a generator will hand out
             or (isinstance(component, Generator) and component.hides_faces())
+            # a value chosen in secret until it is revealed
+            or isinstance(component, SecretChoice)
             for component in self.components_dict.values()
         )
 
@@ -670,6 +673,23 @@ class Session:
                                 self.components_dict[built.id] = built
                             self.components_lists["fixed"].append(game_component)
                             self.components_dict[component['id']] = game_component
+                        case 'secret_choice' if list_name == 'fixed':
+                            # secret_choice: a value chosen in secret, then revealed
+                            game_component = SecretChoice(
+                                component['id'],
+                                component['x'],
+                                component['y'],
+                                component['width'],
+                                component['height'],
+                                component['choices'],
+                                component.get('nationality'),
+                                # choice, validated, revealed: only there on a saved session
+                                component.get('choice'),
+                                component.get('validated', False),
+                                component.get('revealed', False),
+                            )
+                            self.components_lists["fixed"].append(game_component)
+                            self.components_dict[component['id']] = game_component
                         case 'token' if list_name == 'movable':
                             game_component = self.build_token(component)
                             self.components_lists['movable'].append(game_component)
@@ -733,7 +753,10 @@ class Session:
             # nationality: the side this token belongs to, when the game says so
             component.get('nationality'),
             # block_sight: hides the tokens under it from the other nationalities
-            component.get('block_sight', False)
+            component.get('block_sight', False),
+            rotation_step=component.get('rotation_step', 45),
+            # ignore_magnetism: released where it is dropped, never on a hex
+            ignore_magnetism=component.get('ignore_magnetism', False),
         )
 
     @staticmethod
@@ -771,6 +794,7 @@ class Session:
             # whether the players may turn the card, only when it says so
             component.get('orientable', False),
             component.get('border'),
+            rotation_step=component.get('rotation_step', 45),
         )
 
     def build_deck(self, component: dict) -> Deck:
@@ -1699,14 +1723,15 @@ class Session:
     def sees_hidden_face(self, user, token, side=None) -> bool:
         """
         Whether user may know the face a token does not show. A token that
-        belongs to a nationality keeps it for the players of that nationality:
-        the others, and every watcher, only know the face shown on the table.
+        belongs to nationalities keeps it for the players of those
+        nationalities: the others, and every watcher, only know the face shown
+        on the table.
         :param side: the side the token is described on, when it is not the
             one it shows right now
         """
         is_player = user is not None and getattr(user, 'role', None) == 'player'
         if token.nationality is not None and not (
-            is_player and getattr(user, 'nationality', None) == token.nationality
+            is_player and getattr(user, 'nationality', None) in token.nationality
         ):
             return False
         # the front of a card lying on its back is known to nobody, except
@@ -1766,6 +1791,13 @@ class Session:
             key: self._without_hidden_faces(item, user, pending_sides)
             for key, item in value.items()
         }
+        if value.get('kind') == 'secret_choice':
+            # the value chosen in secret stays on the server until it is revealed
+            secret = self.components_dict.get(value.get('id'))
+            if isinstance(secret, SecretChoice) and value.get('revealed') is not True and not (
+                getattr(user, 'role', None) == 'player' and secret.acquirable_by(user)
+            ):
+                cleaned['choice'] = None
         if 'front_src' in value and 'back_src' in value:
             token = self.components_dict.get(value.get('id', value.get('component_id')))
             if isinstance(token, Token):
@@ -1970,9 +2002,11 @@ class Session:
             demoted.append(user)
         return demoted
 
-    def add_user(self, user, role):
+    def add_user(self, user, role, admin=False):
         """
         Adds a user to the session. role determines where the user is added.
+        An administrator watching the game (admin) is not held back by the
+        watchers quota.
         Returns (True, None) if successful, (False, reason) otherwise.
         """
         if user in self.players or user in self.watchers:
@@ -1990,7 +2024,7 @@ class Session:
                 user.nationality = self.player_nationalities.get(user.name)
                 return True, None
             case 'watcher':
-                if len(self.watchers) >= self.max_watchers:
+                if not admin and len(self.watchers) >= self.max_watchers:
                     # code stable : le client doit pouvoir dire a l'utilisateur
                     # que la partie refuse des spectateurs, pas qu'elle est pleine
                     return False, "watchers_full"
@@ -2232,6 +2266,9 @@ class Session:
         :return: the (x, y) top-left corner to place the token at
         """
         if getattr(component, 'kind', None) != 'token':
+            return x, y
+        # a marker that ignores the hexes lands where it is dropped
+        if getattr(component, 'ignore_magnetism', False):
             return x, y
         if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y)):
             return x, y

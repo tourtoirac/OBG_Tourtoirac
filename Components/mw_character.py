@@ -1,4 +1,4 @@
-from Components.component import Component
+from Components.component import Component, nationality_allows, read_nationality
 from user import User
 
 # the two columns of an mw_character, and how many states a box of each goes
@@ -72,7 +72,7 @@ class MwCharacter(Component):
         self.coordinates = (x, y)
         self.image_src = {'front': front_src, 'back': back_src if back_src else None}
         self.side = 'back' if side == 'back' and self.image_src['back'] is not None else 'front'
-        self.nationality = nationality if isinstance(nationality, str) and nationality else None
+        self.nationality = read_nationality(nationality)
         # the cards under the character, the last one put on top; built by
         # the session, which indexes them
         self.cards = []
@@ -111,7 +111,7 @@ class MwCharacter(Component):
         Who may mark the boxes and turn the card over: a player of its
         nationality, anybody when it has none. It is never taken in hand.
         """
-        return self.nationality is None or self.nationality == getattr(user, 'nationality', None)
+        return nationality_allows(self.nationality, user)
 
     def flippable(self) -> bool:
         return self.image_src['back'] is not None

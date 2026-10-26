@@ -309,17 +309,25 @@ class Lobby:
         if user.session is session:
             return True, None
 
+        if role not in ("player", "watcher", "admin"):
+            return False, "invalid_role"
+        # an administrator of OBG watches any game, even one refusing watchers
+        # or with all its watchers: the session key it holds comes from Chabanas
+        admin = role == "admin"
+        if admin:
+            role = "watcher"
+
         # the same player may still be attached through a connection that has
         # not been torn down yet: the newest connection wins.
         previous = session.find_user(user.name)
         if previous is not None and previous is not user:
+            # an administrator never takes the place of a participant of that name
+            if admin and not previous.admin:
+                return False, "nickname_connected"
             self.logger.debug(
                 f"[RESUME] Replacing stale connection of {user.name} on session {session.code}"
             )
             session.remove_user(previous)
-
-        if role not in ("player", "watcher"):
-            return False, "invalid_role"
 
         # la reprise ne passe pas par Chabanas : c'est ici qu'une partie
         # commencee refuse un joueur qui n'y a pas de siege. Sans liste de
@@ -335,11 +343,12 @@ class Lobby:
                 return False, "server_full"
 
         session = self._kept_in_memory(session)
-        success, reason = session.add_user(user, role)
+        success, reason = session.add_user(user, role, admin=admin)
         if not success:
             self._release_if_empty(session)
             return False, reason
 
+        user.admin = admin
         user.session = session
         if role == "player":
             self._record_launch(session)
@@ -504,9 +513,10 @@ class Lobby:
         return True, None
 
     @defer.inlineCallbacks
-    def close_session(self, session: Session):
+    def close_session(self, session: Session, by_admin: bool = False):
         """
-        Archive une session pour de bon, au nom de son proprietaire.
+        Archive une session pour de bon, au nom de son proprietaire, ou d'un
+        administrateur d'OBG (by_admin) : chaque ecran l'annonce alors.
 
         Chabanas est appele deux fois, dans cet ordre : d'abord pour stocker ou
         en sont les pions, afin que la partie archivee garde sa derniere
@@ -535,16 +545,81 @@ class Lobby:
         # the players became watchers: the game is no longer in progress
         self.chabanas.vacate_game(session.code)
         self.logger.info(
-            f"[SESSION] {session.key} closed by its owner, "
+            f"[SESSION] {session.key} closed by {'an administrator' if by_admin else 'its owner'}, "
             f"{len(demoted)} player(s) turned into watcher(s)"
         )
         # toute la session l'apprend : l'owner qui reclique, et les autres qui
         # passent du coup du role de joueur a celui de spectateur
-        session.send({"event": "session_closed"})
+        session.send({"event": "session_closed", "by_admin": by_admin})
         # the players became watchers: each screen refreshes its list of names
         self._send_status(session)
         self._notify_lobby_users("closed", session)
         return True, None
+
+    # -------------------------------------------------
+    # Administration of OBG (admin_api.py, for the Chabanas /manage/ pages)
+    # -------------------------------------------------
+
+    def presence(self) -> list:
+        """
+        Who is connected to each session in memory, the only place that knows
+        the live connections. A session that is not listed has nobody in it.
+        :return: [{key, code, closed, players, watchers}], nicknames of the
+            connected users; the administrators watching are counted apart
+        """
+        return [
+            {
+                "key": str(session.key),
+                "code": session.code,
+                "closed": session.closed,
+                "players": [user.name for user in session.players],
+                "watchers": [user.name for user in session.watchers if not user.admin],
+                "admins": sum(1 for user in session.watchers if user.admin),
+            }
+            for session in self.sessions.values()
+        ]
+
+    @defer.inlineCallbacks
+    def admin_close(self, session_key: str):
+        """
+        An administrator archives a session. One in memory is closed here as by
+        its owner (state stored, then archived): its players become watchers
+        and are told the administrator closed it.
+        :return: (handled, reason): handled is False when the session is not in
+            memory, and Chabanas archives it alone
+        """
+        session = self.sessions.get(session_key)
+        if session is None:
+            return False, None
+        if session.closed:
+            return True, None
+        closed, reason = yield self.close_session(session, by_admin=True)
+        return closed, reason
+
+    def admin_delete(self, session_key: str) -> bool:
+        """
+        An administrator deletes a session: everybody in it is told and taken
+        out of it, and it is dropped from memory without being stored, since
+        Chabanas deletes it right after.
+        :return: whether the session was in memory
+        """
+        session = self.sessions.get(session_key)
+        if session is None:
+            return False
+        had_players = bool(session.players)
+        # nothing is stored any more when it empties
+        session.closed = True
+        session.send({"event": "session_deleted"})
+        for user in list(session.players) + list(session.watchers):
+            session.remove_user(user)
+            user.session = None
+            user.acquired = []
+        self.remove_session(session)
+        if had_players and session.code:
+            self.chabanas.vacate_game(session.code)
+        self.logger.info(f"[SESSION] {session.key} deleted by an administrator")
+        self._notify_lobby_users("closed", session)
+        return True
 
     def add_user(self, user: User):
         self.users[user.protocol] = user

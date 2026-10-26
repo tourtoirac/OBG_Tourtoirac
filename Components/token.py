@@ -1,4 +1,4 @@
-from Components.component import Component
+from Components.component import Component, nationality_allows, read_nationality
 from user import User
 
 # Un jeton lâché à moins de MOVE_THRESHOLD pixels de sa case de départ est
@@ -28,12 +28,15 @@ def normalize_orientation(orientation) -> int:
 
 class Token (Component):
     # tokens are objects that can be moved, flipped
-    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None, nationality=None, block_sight=False):
+    def __init__(self, component_id, x, y, front_image, back_image, width, height, move_border=True, initial=None, border=None, in_place=None, orientable=False, orientation=0, side=None, origin=None, origin_x=None, origin_y=None, nationality=None, block_sight=False, rotation_step=ROTATION_STEP, ignore_magnetism=False):
         super().__init__(component_id)
         self.kind = 'token'
-        # nationality: the side the token belongs to, among the nationalities
-        # of the game; None on a token that belongs to nobody
-        self.nationality = nationality if isinstance(nationality, str) and nationality else None
+        # ignore_magnetism: a marker (turn, victory points...) is released where
+        # it is dropped, never pulled onto a hex. Only the boolean True counts.
+        self.ignore_magnetism = ignore_magnetism is True
+        # nationality: the sides the token belongs to, among the nationalities
+        # of the game, as a list; None on a token that belongs to nobody
+        self.nationality = read_nationality(nationality)
         # block_sight: in the stack preview, the players of another nationality
         # and the watchers do not see the tokens lying under this one. Only the
         # boolean True counts.
@@ -64,6 +67,12 @@ class Token (Component):
         # valeur booleenne True compte : une chaine "false" ne vaut pas plus
         # qu'un absent.
         self.orientable = orientable is True
+        # Only integer divisors of a full turn make a stable rotation cycle.
+        self.rotation_step = (
+            rotation_step if type(rotation_step) is int
+            and 0 < rotation_step <= 360 and 360 % rotation_step == 0
+            else ROTATION_STEP
+        )
         # emplacement initial, celui du jeu : y revenir rend le rectangle vert.
         # initial/in_place sont fournis quand la session est reprise apres une
         # sauvegarde.
@@ -166,7 +175,7 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
         A token that belongs to a nationality is only taken by a player of
         that nationality; a token without one is taken by anybody.
         """
-        return self.nationality is None or self.nationality == getattr(user, 'nationality', None)
+        return nationality_allows(self.nationality, user)
 
     def acquire(self, user: User):
         if self.acquired_by is not None and self.acquired_by != user:
@@ -270,6 +279,7 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
             "height": self.height,
             "orientation": self.orientation,
             "orientable": self.orientable,
+            "rotation_step": self.rotation_step,
             "move_border": self.move_border,
             "border": self.border,
             "in_place": self.in_place,
@@ -281,5 +291,6 @@ Un jeton est considéré comme posé à sa case de départ s'il est à moins
             "origin_x": self.origin_x,
             "origin_y": self.origin_y,
             "nationality": self.nationality,
-            "block_sight": self.block_sight
+            "block_sight": self.block_sight,
+            "ignore_magnetism": self.ignore_magnetism
         }
