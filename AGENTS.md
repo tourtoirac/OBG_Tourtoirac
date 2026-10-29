@@ -143,6 +143,27 @@ leur attache un errback de journalisation.
 
 Le client attend aussi `session_created`, que le serveur n'émet jamais.
 
+### Jeux en prototypage
+
+Un jeu de Chabanas avec une `prototype_key` est verrouillé dans le lobby.
+Message `unlock_game {game_name, prototype_key}` → `/game/unlock` →
+événement `game_unlocked {game_name}` ou erreur `prototype_key_incorrect`.
+`create_session` et `join_session` relaient `prototype_key` ; un 423 de
+Chabanas devient `prototype_key_incorrect`. `resume_session` (clé de
+session) n'est pas contrôlé. `Lobby.return_active_sessions` retire `key` et
+`access_key` de chaque session avant de l'envoyer aux navigateurs
+(`_hide_secrets`) : la `key` d'une session permettrait d'entrer par
+`resume_session` sans aucun contrôle. Tests : `tests/test_prototype.py`.
+
+`POST /admin/check {game_json}` (`admin_api.py`, `game_check.py`) : pour les
+prototypes de Chabanas, avant d'enregistrer un game_json. Répond
+`{problems: [...]}` : `kind` absent, inconnu ou refusé par sa liste (ce que
+`load_session_components` ignore sans rien dire ; `LIST_KINDS` est à tenir à
+jour avec son `match`), contenu d'un sac qui n'est pas un pion, ids en double,
+puis toute erreur de construction d'une `Session` à blanc. Au 27/10/2026,
+seul Vietnam (et ses variantes) y échoue : `viet_cong_random-55` du sac
+`viet-congs` a le kind `back`. Tests : `tests/test_game_check.py`.
+
 ### Administration d'OBG (`admin_api.py`)
 
 API HTTP interne, port 9001 (jamais publié), démarrée par `start_server`
@@ -430,7 +451,11 @@ Clé **facultative, à la racine** du `game_json` (pas dans `options`) :
 consultent depuis la page de jeu. `session.read_documents` nettoie la liste
 (entrée sans `src` écartée, `name` absent remplacé par le `src`),
 `return_session_json` la renvoie dans `documents`, et `game_json_state` la
-conserve puisqu'elle reste dans le `game_json`.
+conserve puisqu'elle reste dans le `game_json`. Depuis le 27/10/2026, les
+documents d'un jeu ou d'une variante ne sont plus écrits dans son `game_json`
+de catalogue : Chabanas les garde dans son champ `documents` et ajoute ce bloc
+au `game_json` de la session quand il la crée (`starting_game_json`). Rien ne
+change ici ; `/admin/check` reçoit un game_json sans documents.
 
 ## Icônes des joueurs (`player_icons`)
 

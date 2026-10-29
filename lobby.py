@@ -25,6 +25,7 @@ class Lobby:
         response = yield self.chabanas.list_active(sat_list)
         active = response.get("sessions", {})
         self._mark_connected_players(active)
+        self._hide_secrets(active)
         return {
             "active": active,
             # every game of the platform, Air Force included, and the limit
@@ -47,6 +48,18 @@ class Lobby:
                     online = {user.name for user in live.players + live.watchers}
                 for player in session_info.get("players") or []:
                     player["connected"] = player.get("nickname") in online
+
+    @staticmethod
+    def _hide_secrets(active: dict) -> None:
+        """
+        The list goes to every browser of the lobby: the key of a session lets
+        resume_session in without the checks of join_session (access_key, key of
+        a game in prototyping), and the access_key is the secret itself.
+        """
+        for sessions in active.values():
+            for session_info in sessions:
+                session_info.pop("key", None)
+                session_info.pop("access_key", None)
 
     @staticmethod
     def _owner_of(session_info: dict) -> str | None:
@@ -155,7 +168,8 @@ class Lobby:
             session_max_players: int | None = None,
             access_key: str | None = None,
             variant_name: str | None = None,
-            nationality: str | None = None
+            nationality: str | None = None,
+            prototype_key: str = ""
     ):
         # checks if a session can be created with that user
         session_info, reason = yield self.chabanas.create_session(
@@ -167,7 +181,8 @@ class Lobby:
             session_max_players,
             access_key,
             variant_name,
-            nationality
+            nationality,
+            prototype_key
         )
         if not session_info:
             return False, reason or "Unable to create session"
@@ -221,7 +236,7 @@ class Lobby:
 
     @defer.inlineCallbacks
     def join_session(self, session_code: str, user: User, key: str = "", role: str = "player", access_key: str = "",
-                     nationality: str | None = None):
+                     nationality: str | None = None, prototype_key: str = ""):
         self.logger.debug(f"Trying to find opened session with code {session_code}")
 
         # un pseudo actuellement assis a la table ne peut pas etre repris par une
@@ -237,7 +252,7 @@ class Lobby:
         # quand la session est deja chargee ici, sinon on laisserait rejoindre
         # n'importe qui avec un code devine.
         session_info, reason = yield self.chabanas.join_session(
-            session_code, user, key, access_key, role, nationality
+            session_code, user, key, access_key, role, nationality, prototype_key
         )
         if not session_info:
             return False, reason

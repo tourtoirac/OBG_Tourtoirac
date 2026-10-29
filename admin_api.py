@@ -12,6 +12,9 @@ the X-OBG-Admin-Secret header; without that variable the API is not started.
     POST /admin/close   {"key": ...}        {handled}: False when the session is
                                             not in memory (Chabanas archives it)
     POST /admin/delete  {"key": ...}        {handled}: False when not in memory
+    POST /admin/check   {"game_json": ...}  {problems: [...]}: what keeps that game_json
+                                            from being played (game_check.py), empty
+                                            when it can be; for the prototypes of Chabanas
 """
 import hmac
 import json
@@ -19,6 +22,8 @@ import os
 
 from twisted.internet import defer
 from twisted.web import resource, server
+
+from game_check import check_game_json
 
 ADMIN_PORT = 9001
 SECRET_HEADER = b"x-obg-admin-secret"
@@ -69,6 +74,10 @@ class AdminResource(resource.Resource):
             body = json.loads(request.content.read() or b"{}")
         except ValueError:
             body = None
+        if request.path == b"/admin/check":
+            if not isinstance(body, dict) or "game_json" not in body:
+                return self._answer(request, 400, {"error": "missing_game_json"})
+            return self._answer(request, 200, {"problems": check_game_json(body["game_json"])})
         if not isinstance(body, dict) or not body.get("key"):
             return self._answer(request, 400, {"error": "missing_key"})
         key = str(body["key"])

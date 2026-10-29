@@ -120,7 +120,8 @@ class Chabanas:
             session_max_players: int | None,
             access_key: str | None = None,
             variant_name: str | None = None,
-            nationality: str | None = None
+            nationality: str | None = None,
+            prototype_key: str = ""
     ):
         """
         Creates a session in Chabanas, then reads it back with its game_json.
@@ -137,10 +138,14 @@ class Chabanas:
             "access_key": access_key,
             "variant_name": variant_name,
             "nationality": nationality,
+            "prototype_key": prototype_key,
         }, with_status=True)
         if status == 422:
             # the game declares nationalities and the player chose none of them
             return None, "invalid_nationality"
+        if status == 423:
+            # a game in prototyping, without its key
+            return None, "prototype_key_incorrect"
         if status == 409:
             # the platform already runs its maximum number of games
             return None, "server_full"
@@ -163,7 +168,7 @@ class Chabanas:
 
     @defer.inlineCallbacks
     def join_session(self, session_code: str, user: User, key: str, access_key: str = "", role: str = "player",
-                     nationality: str | None = None):
+                     nationality: str | None = None, prototype_key: str = ""):
         """
         Asks Chabanas whether that user may join. Chabanas alone knows the
         session's access_key and the key of every nickname, so it is the only
@@ -178,6 +183,7 @@ class Chabanas:
             "access_key": access_key,
             "role": role,
             "nationality": nationality,
+            "prototype_key": prototype_key,
         }, with_status=True)
 
         if status == 400:
@@ -186,6 +192,9 @@ class Chabanas:
         if status == 401:
             # access_key fausse, ou key différente de celle de ce pseudo
             return None, "access_key_incorrect"
+        if status == 423:
+            # a game in prototyping, without its key
+            return None, "prototype_key_incorrect"
         if status == 403:
             # les spectateurs ne sont pas autorisés sur cette partie
             return None, "watchers_not_allowed"
@@ -331,6 +340,23 @@ class Chabanas:
             self.logger.error("[CHABANAS] Response has no 'game_list' field")
             return False
         return game_list
+
+    @defer.inlineCallbacks
+    def unlock_game(self, game_name: str, prototype_key: str):
+        """
+        Asks Chabanas whether that key opens a game in prototyping.
+
+        :return: (True, None) when it does, (False, reason) otherwise.
+        """
+        status, _ = yield self._post_json("/game/unlock", {
+            "game_name": game_name,
+            "prototype_key": prototype_key,
+        }, with_status=True)
+        if status == 200:
+            return True, None
+        if status == 423:
+            return False, "prototype_key_incorrect"
+        return False, "Unable to unlock game"
 
     @defer.inlineCallbacks
     def is_ready(self):

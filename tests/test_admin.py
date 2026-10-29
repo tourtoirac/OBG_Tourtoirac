@@ -150,3 +150,27 @@ class TestAdminApi:
 
         assert json.loads(body) == {"handled": True}
         assert lobby.sessions == {}
+
+
+class TestAdminCheck:
+    def test_the_problems_of_a_game_json(self, lobby):
+        req = request("POST", "/admin/check", body={"game_json": {"fixed": [{"kind": "bord", "id": "x"}]}})
+
+        body = json.loads(AdminResource(lobby, LOGGER, SECRET).render(req))
+
+        assert req.responseCode == 200
+        assert len(body["problems"]) == 1
+
+    def test_without_game_json(self, lobby):
+        req = request("POST", "/admin/check", body={})
+
+        AdminResource(lobby, LOGGER, SECRET).render(req)
+
+        assert req.responseCode == 400
+
+    def test_without_the_secret(self, lobby):
+        req = request("POST", "/admin/check", secret=None, body={"game_json": {}})
+
+        AdminResource(lobby, LOGGER, SECRET).render(req)
+
+        assert req.responseCode == 403

@@ -526,8 +526,10 @@ class Session:
         self.nationalities = read_nationalities(game_json)
         # the nationality Chabanas stored on each seat, by nickname
         self.player_nationalities = dict(player_nationalities or {})
-        # documents: the PDF files the game lets the players consult. They
-        # stay in the game_json, so the saved state keeps them.
+        # documents: the files the game lets the players consult, put in the
+        # game_json of the session by Chabanas when it creates it (from the
+        # documents field of the game or variant). They stay in the game_json,
+        # so the saved state keeps them.
         self.documents = read_documents(game_json)
         # player_icons: the images shown before the names of the players. A
         # player gets one at random, among those nobody has, the first time it

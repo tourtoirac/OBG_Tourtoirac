@@ -36,6 +36,7 @@ CREATE_REFUSALS = {
     "invalid_nationality": "This game requires choosing one of its nationalities",
     "duplicate_component_ids": "This game declares several components with the same id: it cannot be started",
     "server_full": "The server already runs its maximum number of games",
+    "prototype_key_incorrect": "This game is in prototyping: wrong or missing key",
 }
 
 
@@ -62,6 +63,8 @@ def create_session(self, logger, message):
     variant_name = message.get("variant_name", None)
     # only read by a game that declares nationalities; Chabanas checks it
     nationality = message.get("nationality", None)
+    # only read by a game in prototyping; Chabanas checks it
+    prototype_key = message.get("prototype_key", "")
 
     if game_name is None:
         self.send_error(
@@ -80,6 +83,7 @@ def create_session(self, logger, message):
         access_key,
         variant_name,
         nationality,
+        prototype_key,
     )
 
     if not success:
@@ -116,6 +120,7 @@ JOIN_REFUSALS = {
     "nickname_connected": "This nickname is already playing",
     "invalid_nationality": "This game requires choosing one of its nationalities",
     "server_full": "The server already runs its maximum number of games",
+    "prototype_key_incorrect": "This game is in prototyping: wrong or missing key",
 }
 
 
@@ -246,6 +251,8 @@ def join_session(self, logger, message):
     # asked of a new player when the game declares nationalities; a returning
     # player keeps the one of their seat
     nationality = message.get("nationality", None)
+    # only read by a game in prototyping; Chabanas checks it
+    prototype_key = message.get("prototype_key", "")
 
     success, error = yield self.factory.lobby.join_session(
         session_code,
@@ -253,7 +260,8 @@ def join_session(self, logger, message):
         player_key,
         role,
         access_key,
-        nationality
+        nationality,
+        prototype_key
     )
 
     if not success:
@@ -329,6 +337,25 @@ def list_game(self, _, __):
             "game_list": result,
         }
     )
+
+
+@defer.inlineCallbacks
+def unlock_game(self, _, message):
+    """
+    Checks the key of a game in prototyping: the lobby opens its tab on
+    game_unlocked. Creating or joining one of its sessions checks it again.
+    """
+    user = self.factory.lobby.get_user(self)
+    game_name = message.get("game_name")
+    prototype_key = message.get("prototype_key")
+    if not isinstance(game_name, str) or not isinstance(prototype_key, str):
+        self.send_error("missing_field", "The unlock_game message requires game_name and prototype_key")
+        return
+    unlocked, error = yield self.factory.lobby.chabanas.unlock_game(game_name, prototype_key)
+    if not unlocked:
+        self.send_error(error, CREATE_REFUSALS.get(error, f"Unable to unlock game {game_name}"))
+        return
+    user.send({"event": "game_unlocked", "game_name": game_name})
 
 
 def resolve_component_action(self, message, action, required_fields):

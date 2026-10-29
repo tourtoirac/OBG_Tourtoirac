@@ -13,7 +13,7 @@ from twisted.internet.defer import Deferred
 
 from admin_api import start_admin_api
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, choose, validate_choice, reveal_choice, view, follow
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, unlock_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, choose, validate_choice, reveal_choice, view, follow
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -86,6 +86,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
         match action:
             case "list_game": # Gets the initialization values of the games
                 result = list_game(self, self.factory.lobby.logger, message)
+            case "unlock_game": # gives the key of a game in prototyping
+                result = unlock_game(self, self.factory.lobby.logger, message)
             case "list_sessions": # get list of available sessions in lobby
                 result = list_sessions(self, self.factory.lobby.logger, message)
             case "create_session": # Creates a new session for a game
