@@ -1098,6 +1098,31 @@ class Session:
         copy.acquire(user)
         return copy
 
+    def setup_copy(self, entry: dict):
+        """
+        A setup entry naming a model of a generator takes a new copy out of it,
+        as a player dragging the model would, with the next id (model-1,
+        model-2...): an entry naming the same model three times gives three
+        copies. The copy lies on the table above the others; the setup then
+        gives it its position. Only an entry with a position does it: a copy
+        has nowhere else to go.
+        :return: the copy, or None when no generator has such a model
+        """
+        if not all(field in entry for field in ('x', 'y')):
+            return None
+        for generator in self.components_lists['fixed']:
+            if not isinstance(generator, Generator) or generator.model(entry['component_id']) is None:
+                continue
+            description = generator.copy_description(entry['component_id'], self.components_dict)
+            builder = self.build_card if description['kind'] == 'card' else self.build_token
+            copy = builder(description)
+            copy.leave_table()
+            copy.enter_table(entry['x'], entry['y'])
+            self.components_lists['movable'].append(copy)
+            self.components_dict[copy.id] = copy
+            return copy
+        return None
+
     def destroy_copy(self, generator: Generator, component) -> None:
         """
         Removes a copy released over its generator from the game: it leaves
@@ -2443,8 +2468,18 @@ class Session:
         # reads them again
         emptied = {}
 
-        for entry in self.setup:
+        for index, entry in enumerate(self.setup):
             component = self.components_dict.get(entry['component_id'])
+            if component is None and 'container_id' not in entry:
+                # the id of a model of a generator: a new copy is taken out of
+                # it and laid where the entry says. The entry now names the
+                # copy, so that applying the setup again moves it instead of
+                # taking out another one
+                component = self.setup_copy(entry)
+                if component is not None:
+                    entry = dict(entry, component_id=component.id)
+                    self.setup[index] = entry
+                    movable_ids.add(component.id)
             if component is None:
                 # un setup qui parle d'un composant que le jeu ne declare pas
                 # est une faute de saisie : on l'ignore, la partie demarre

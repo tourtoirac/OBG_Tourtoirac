@@ -693,6 +693,14 @@ gauche des participants, chacun sur la face de son `side`.
   en jeu d'un générateur (`generator_of`, liste `created`), il quitte
   `movable` et `components_dict` (`destroy_copy`) et l'événement porte
   `generator_id`. Tout autre pion est posé comme un `release` ordinaire.
+- Setup : une entrée dont le `component_id` est l'id d'un modèle (absent de
+  `components_dict`) et qui a `x` et `y` tire une copie à l'application du
+  setup (`Session.setup_copy`, dans `apply_setup`) : même id `<modèle>-<n>`,
+  rangée dans `created`, posée en `x`/`y` qui devient sa case de départ.
+  L'entrée de `self.setup` est réécrite avec l'id de la copie (réappliquer ne
+  tire rien de plus). Rien n'est créé à la construction : une session
+  sauvegardée avant le setup garde le setup d'origine et ne double pas les
+  copies. Le client crée la copie inconnue depuis l'événement `setup`.
 - `return_json` n'envoie de chaque modèle que la face qu'il montre ;
   `state_json` garde les deux, plus `generated` (`{modèle: dernier n}`) et
   `created` (ids des copies en jeu), relus à la reprise. Un modèle de carte

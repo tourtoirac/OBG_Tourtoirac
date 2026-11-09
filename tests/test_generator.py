@@ -289,3 +289,78 @@ class TestSavedState:
         # and the numbering goes on
         call(generate, protocol, "supply", model_id="marker")
         assert movable_ids(resumed) == ["army", "marker-3"]
+
+
+class TestSetupCopies:
+    """A setup entry naming a model of a generator takes a copy out of it."""
+
+    SETUP = [
+        {"component_id": "marker", "x": 100, "y": 110},
+        {"component_id": "marker", "x": 200, "y": 210, "side": "front"},
+        {"component_id": "marker", "x": 300, "y": 310},
+        {"component_id": "event", "x": 400, "y": 410},
+    ]
+
+    def test_each_entry_gives_a_new_copy_where_it_says(self):
+        session = build_session(setup=self.SETUP)
+        applied = session.apply_setup()
+
+        assert movable_ids(session) == ["army", "marker-1", "marker-2", "marker-3", "event-1"]
+        positions = [(session.get_component(i).x, session.get_component(i).y)
+                     for i in ("marker-1", "marker-2", "marker-3", "event-1")]
+        assert positions == [(100, 110), (200, 210), (300, 310), (400, 410)]
+        assert session.get_component("marker-2").side == "front"
+        assert isinstance(session.get_component("event-1"), Card)
+        assert {item["id"] for item in applied} == {"marker-1", "marker-2", "marker-3", "event-1"}
+        assert session.get_component("supply").created == ["marker-1", "marker-2", "marker-3", "event-1"]
+
+    def test_the_copies_are_not_there_before_the_setup_is_applied(self):
+        session = build_session(setup=self.SETUP)
+        assert movable_ids(session) == ["army"]
+
+    def test_applying_the_setup_again_takes_out_no_other_copy(self):
+        session = build_session(setup=self.SETUP)
+        session.apply_setup()
+        session.apply_setup()
+        assert movable_ids(session) == ["army", "marker-1", "marker-2", "marker-3", "event-1"]
+
+    def test_the_setup_position_is_the_starting_square_of_the_copy(self):
+        session = build_session(setup=self.SETUP)
+        session.apply_setup()
+        copy = session.get_component("marker-1")
+        assert (copy.initial_x, copy.initial_y) == (100, 110)
+
+    def test_an_entry_without_position_takes_out_nothing(self):
+        session = build_session(setup=[{"component_id": "marker", "side": "front"}])
+        session.apply_setup()
+        assert movable_ids(session) == ["army"]
+
+    def test_an_unknown_id_is_still_ignored(self):
+        session = build_session(setup=[{"component_id": "nothing", "x": 1, "y": 1}])
+        session.apply_setup()
+        assert movable_ids(session) == ["army"]
+
+    def test_a_setup_copy_given_back_to_the_generator_is_destroyed(self):
+        session = build_session(setup=self.SETUP)
+        protocol, user = player_on(session)
+        session.apply_setup()
+        session.get_component("marker-2").acquire(user)
+
+        call(release, protocol, "marker-2", x=10, y=10, generator=True)
+
+        assert movable_ids(session) == ["army", "marker-1", "marker-3", "event-1"]
+        assert user.sent[-1]["generator_id"] == "supply"
+
+    def test_a_session_saved_before_the_setup_takes_the_copies_out_once(self):
+        session = build_session(setup=self.SETUP)
+        resumed = build_session(game_json=session.game_json_state())
+        resumed.apply_setup()
+        assert movable_ids(resumed) == ["army", "marker-1", "marker-2", "marker-3", "event-1"]
+
+    def test_a_session_saved_after_the_setup_keeps_its_copies(self):
+        session = build_session(setup=self.SETUP)
+        session.apply_setup()
+        resumed = build_session(game_json=session.game_json_state())
+        assert movable_ids(resumed) == ["army", "marker-1", "marker-2", "marker-3", "event-1"]
+        assert resumed.pending_setup() == []
+        assert resumed.get_component("supply").created == ["marker-1", "marker-2", "marker-3", "event-1"]
