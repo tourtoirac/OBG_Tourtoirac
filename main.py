@@ -14,7 +14,7 @@ from twisted.internet.defer import Deferred
 
 from admin_api import start_admin_api
 from chabanas import Chabanas
-from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, unlock_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, choose, validate_choice, reveal_choice, view, follow
+from handle_message import list_sessions, create_session, join_session, resume_session, close_session, start_session, list_game, unlock_game, acquire, release, pick, generate, take, give, voice_join, voice_leave, voice_signal, voice_allow, chat_send, show_open, show_add, show_remove, show_close, draw, shuffle, refill, deal, move, roll, roll_pool, rotate, flip, order_players, fix_positions, apply_setup, increment, decrement, mark, choose, validate_choice, reveal_choice, view, follow, debug_state
 from session import InvalidComponentError
 from lobby import Lobby
 from user import User
@@ -183,6 +183,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 result = fix_positions(self, self.factory.lobby.logger, message)
             case "apply_setup": # the game setup lands once every component is placed
                 result = apply_setup(self, self.factory.lobby.logger, message)
+            case "debug_state": # development only: the game_json the session would store now
+                debug_state(self, self.factory.lobby.logger, message)
             case _:
                 self.send_error(
                     "unknown_action",

@@ -1,5 +1,6 @@
 import json
 import math
+import os
 
 from twisted.internet import defer
 
@@ -2013,4 +2014,39 @@ def apply_setup(self, logger, message):
     user.session.send({
         "event": "setup",
         "components": components,
+    })
+
+
+def debug_state_enabled() -> bool:
+    """
+    The debug_state action is only answered on a development machine, which
+    sets OBG_DEBUG_STATE=1: it hands out the hidden information of the game.
+    """
+    return os.environ.get("OBG_DEBUG_STATE", "") == "1"
+
+
+def debug_state(self, logger, message):
+    """
+    Sends back the game_json the session would store if everybody left it at
+    once (Session.game_json_state), hidden information included, so the
+    situation of a bug can be handed over. Elsewhere than on a development
+    machine the action does not exist.
+    """
+    logger.debug("Process debug_state message")
+    if not debug_state_enabled():
+        self.send_error("unknown_action", "Unknown action: debug_state")
+        return
+    user = self.factory.lobby.get_user(self)
+    if user is None:
+        self.send_error("unknown_user", "No user is bound to this connection")
+        return
+    if user.session is None:
+        self.send_error(
+            "no_session",
+            "The debug_state action requires an active session"
+        )
+        return
+    user.send({
+        "event": "debug_state",
+        "content": user.session.game_json_state(),
     })
