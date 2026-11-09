@@ -37,6 +37,7 @@ CREATE_REFUSALS = {
     "duplicate_component_ids": "This game declares several components with the same id: it cannot be started",
     "server_full": "The server already runs its maximum number of games",
     "prototype_key_incorrect": "This game is in prototyping: wrong or missing key",
+    "maintenance": "A maintenance of the site is coming: no new game can be created",
 }
 
 
@@ -121,6 +122,7 @@ JOIN_REFUSALS = {
     "invalid_nationality": "This game requires choosing one of its nationalities",
     "server_full": "The server already runs its maximum number of games",
     "prototype_key_incorrect": "This game is in prototyping: wrong or missing key",
+    "maintenance": "A maintenance of the site is coming: only the players of a game may come back to it",
 }
 
 

@@ -15,6 +15,12 @@ the X-OBG-Admin-Secret header; without that variable the API is not started.
     POST /admin/check   {"game_json": ...}  {problems: [...]}: what keeps that game_json
                                             from being played (game_check.py), empty
                                             when it can be; for the prototypes of Chabanas
+    GET  /admin/maintenance                 {phase, starts_at, duration_minutes, message}
+    POST /admin/maintenance {"action": ...} the same, after the action (maintenance.py):
+             announce  + starts_at (ISO 8601 with its time zone), duration_minutes, message
+             start     at once, without waiting for starts_at
+             cancel    the announcement (ends one already started)
+             end       connections accepted again
 """
 import hmac
 import json
@@ -24,6 +30,7 @@ from twisted.internet import defer
 from twisted.web import resource, server
 
 from game_check import check_game_json
+from maintenance import MaintenanceError
 
 ADMIN_PORT = 9001
 SECRET_HEADER = b"x-obg-admin-secret"
@@ -65,6 +72,8 @@ class AdminResource(resource.Resource):
             return self._answer(request, 403, {"error": "forbidden"})
         if request.path == b"/admin/presence":
             return self._answer(request, 200, {"sessions": self.lobby.presence()})
+        if request.path == b"/admin/maintenance":
+            return self._answer(request, 200, self.lobby.maintenance.state_json())
         return self._answer(request, 404, {"error": "not_found"})
 
     def render_POST(self, request):
@@ -78,6 +87,8 @@ class AdminResource(resource.Resource):
             if not isinstance(body, dict) or "game_json" not in body:
                 return self._answer(request, 400, {"error": "missing_game_json"})
             return self._answer(request, 200, {"problems": check_game_json(body["game_json"])})
+        if request.path == b"/admin/maintenance":
+            return self._maintenance(request, body)
         if not isinstance(body, dict) or not body.get("key"):
             return self._answer(request, 400, {"error": "missing_key"})
         key = str(body["key"])
@@ -100,6 +111,33 @@ class AdminResource(resource.Resource):
 
         defer.maybeDeferred(self.lobby.admin_close, key).addCallbacks(closed, failed)
         return server.NOT_DONE_YET
+
+
+    def _maintenance(self, request, body):
+        if not isinstance(body, dict):
+            return self._answer(request, 400, {"error": "missing_action"})
+        action = body.get("action")
+        lobby = self.lobby
+        try:
+            if action == "announce":
+                state = lobby.announce_maintenance(
+                    body.get("starts_at"), body.get("duration_minutes"), body.get("message", ""))
+            elif action == "start":
+                stored = lobby.start_maintenance()
+                stored.addErrback(lambda failure: self.logger.error(
+                    f"[ADMIN] Storing the sessions for the maintenance failed: {failure.getErrorMessage()}"))
+                # answered once every session is stored: the caller may then stop the services
+                stored.addCallback(lambda _: self._finish(request, 200, lobby.maintenance.state_json()))
+                return server.NOT_DONE_YET
+            elif action == "cancel":
+                state = lobby.cancel_maintenance()
+            elif action == "end":
+                state = lobby.end_maintenance()
+            else:
+                return self._answer(request, 400, {"error": "unknown_action"})
+        except MaintenanceError as error:
+            return self._answer(request, 400, {"error": "invalid_maintenance", "message": str(error)})
+        return self._answer(request, 200, state)
 
 
 def start_admin_api(reactor, lobby, logger) -> bool:

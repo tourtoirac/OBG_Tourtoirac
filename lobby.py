@@ -4,18 +4,25 @@ import uuid
 from twisted.internet import defer
 
 from chabanas import Chabanas
+from maintenance import CLOSE_CODE, Maintenance, MaintenanceError
 from session import InvalidComponentError, Session, duplicate_component_ids
 from user import User
 
 
 class Lobby:
 
-    def __init__(self, logger, chabanas):
+    def __init__(self, logger, chabanas, clock=None):
         self.id = str(uuid.uuid4())
         self.sessions = {}
         self.users = {}
         self.logger = logger
         self.chabanas = chabanas
+        # what schedules the start of a maintenance (the reactor; a Clock in the tests)
+        if clock is None:
+            from twisted.internet import reactor as clock
+        self.clock = clock
+        self.maintenance = Maintenance()
+        self._maintenance_timer = None
 
     @defer.inlineCallbacks
     def return_active_sessions(self, sat_list):
@@ -171,6 +178,9 @@ class Lobby:
             nationality: str | None = None,
             prototype_key: str = ""
     ):
+        # a maintenance is coming: no new game would have the time to be played
+        if self.maintenance.phase != "none":
+            return False, "maintenance"
         # checks if a session can be created with that user
         session_info, reason = yield self.chabanas.create_session(
             game_name,
@@ -246,6 +256,17 @@ class Lobby:
         sitting = self._find_session_by_code(session_code)
         if sitting is not None and sitting.find_user(user.name) is not None:
             return False, "nickname_connected"
+
+        # a maintenance is coming: nobody new comes in (decided 2026-10-31), only
+        # a player coming back to a seat of the game. Checked before Chabanas,
+        # which would take a new seat
+        if self.maintenance.phase != "none":
+            seats = sitting.player_names if sitting is not None else None
+            if seats is None:
+                stored = yield self.chabanas.get_session_info(session_code)
+                seats = self._seat_names(stored) if stored else []
+            if role != "player" or user.name not in seats:
+                return False, "maintenance"
 
         # Chabanas est seul juge : c'est lui qui connait l'access_key de la
         # partie et la key de chaque pseudo. On l'interroge donc toujours, meme
@@ -703,10 +724,14 @@ class Lobby:
 
     def shutdown(self):
         """
-        Notifies all connected users and disconnects them gracefully.
-        Called by the reactor shutdown trigger.
+        Stores the situation of every session in memory, then notifies all
+        connected users and disconnects them gracefully. Called by the reactor
+        shutdown trigger, which waits for the Deferred returned: the process
+        only exits once Chabanas got the states (a redeployment loses no move).
+        :return: Deferred, fired when every state was sent to Chabanas
         """
-        self.logger.info("[SERVER] Shutdown initiated, notifying all users")
+        self.logger.info("[SERVER] Shutdown initiated, storing the sessions and notifying all users")
+        stored = self._store_sessions()
         message = {
             "event": "server_shutdown",
             "reason": "Server is shutting down"
@@ -726,4 +751,120 @@ class Lobby:
         self.users.clear()
         self.sessions.clear()
         self.logger.info("[SERVER] All users disconnected")
+        return stored
+
+    def _store_sessions(self):
+        """
+        Sends Chabanas the situation of every open session in memory, as when
+        its last participant leaves (a closed one is already archived). The
+        states are read at once: the caller may forget the sessions right after.
+        :return: Deferred, fired when every call is over (a failure is logged)
+        """
+        states = [
+            (session.key, session.game_json_state())
+            for session in self.sessions.values() if not session.closed
+        ]
+        calls = []
+        for key, state in states:
+            call = defer.maybeDeferred(self.chabanas.update_session_state, key, state)
+            call.addErrback(
+                lambda failure, key=key: self.logger.error(
+                    f"[STORE] Storing the state of session {key} failed: {failure.getErrorMessage()}"
+                )
+            )
+            calls.append(call)
+        if states:
+            self.logger.info(f"[STORE] Storing {len(states)} session(s) in Chabanas")
+        return defer.DeferredList(calls, consumeErrors=True)
+
+    # -------------------------------------------------
+    # Maintenance of the site (maintenance.py, admin_api.py)
+    # -------------------------------------------------
+
+    def maintenance_event(self) -> dict:
+        """What a screen is told of the maintenance: sent on connection, and on every change."""
+        return {"event": "maintenance", **self.maintenance.state_json()}
+
+    def _broadcast(self, message: dict) -> None:
+        for user in list(self.users.values()):
+            user.send(message)
+
+    def _cancel_maintenance_timer(self) -> None:
+        if self._maintenance_timer is not None and self._maintenance_timer.active():
+            self._maintenance_timer.cancel()
+        self._maintenance_timer = None
+
+    def announce_maintenance(self, starts_at, duration_minutes, message="") -> dict:
+        """
+        Every screen shows the countdown; the maintenance starts by itself at
+        starts_at. A new announcement replaces the previous one.
+        :return: the state of the maintenance
+        :raise MaintenanceError: a field badly written, or a maintenance already started
+        """
+        if self.maintenance.started:
+            raise MaintenanceError("a maintenance is already in progress")
+        self.maintenance.announce(starts_at, duration_minutes, message)
+        self._cancel_maintenance_timer()
+        self._maintenance_timer = self.clock.callLater(self.maintenance.seconds_left(), self.start_maintenance)
+        self.logger.info(
+            f"[MAINTENANCE] Announced for {self.maintenance.starts_at.isoformat()}, "
+            f"{self.maintenance.duration_minutes} minute(s)"
+        )
+        self._broadcast(self.maintenance_event())
+        return self.maintenance.state_json()
+
+    def cancel_maintenance(self) -> dict:
+        """
+        The maintenance announced will not happen: the screens hide the
+        countdown. One already started is ended (end_maintenance).
+        :return: the state of the maintenance
+        """
+        if self.maintenance.started:
+            return self.end_maintenance()
+        self._cancel_maintenance_timer()
+        self.maintenance.clear()
+        self.logger.info("[MAINTENANCE] Cancelled")
+        self._broadcast(self.maintenance_event())
+        return self.maintenance.state_json()
+
+    def start_maintenance(self):
+        """
+        The time has come (or the administrator starts it at once): every
+        screen is told, every session in memory is stored in Chabanas, every
+        connection is closed and the new ones are refused (main.py) until
+        end_maintenance. The pages reconnect and resume their game afterwards.
+        :return: Deferred, fired when every state was sent to Chabanas
+        """
+        self._cancel_maintenance_timer()
+        if self.maintenance.started:
+            return defer.succeed(None)
+        self.maintenance.start()
+        self.logger.info("[MAINTENANCE] Started: storing the sessions and closing every connection")
+        self._broadcast({"event": "maintenance_started", **self.maintenance.state_json()})
+        stored = self._store_sessions()
+        occupied = self.occupied_codes()
+        users = list(self.users.values())
+        # forgotten before the closes: onClose then finds nothing to store again
+        self.users.clear()
+        self.sessions.clear()
+        for code in occupied:
+            self.chabanas.vacate_game(code)
+        for user in users:
+            try:
+                user.protocol.sendClose(code=CLOSE_CODE, reason="maintenance")
+            except Exception as error:
+                self.logger.error(f"[MAINTENANCE] Error closing the connection of {user.name}: {error}")
+        return stored
+
+    def end_maintenance(self) -> dict:
+        """
+        The maintenance is over: connections are accepted again, and the pages
+        still open come back by themselves (nobody is connected to be told).
+        :return: the state of the maintenance
+        """
+        self._cancel_maintenance_timer()
+        self.maintenance.clear()
+        self.logger.info("[MAINTENANCE] Ended")
+        self._broadcast(self.maintenance_event())
+        return self.maintenance.state_json()
 

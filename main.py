@@ -8,6 +8,7 @@ from autobahn.twisted.websocket import (
     listenWS,
 )
 from autobahn.websocket.protocol import WebSocketProtocol
+from autobahn.websocket.types import ConnectionDeny
 from twisted.internet import reactor, task
 from twisted.internet.defer import Deferred
 
@@ -35,6 +36,9 @@ OCCUPANCY_CHECK_INTERVAL = 3600
 class GameWebSocketProtocol(WebSocketServerProtocol):
     def onConnect(self, request):
         logger.info(f"New connection : {request.peer}")
+        # during a maintenance nobody comes in: the pages retry until it is over
+        if self.factory.lobby.maintenance.started:
+            raise ConnectionDeny(ConnectionDeny.SERVICE_UNAVAILABLE, "maintenance")
         user = User(
             name="Anonymous",
             protocol=self
@@ -45,6 +49,11 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
 
     def onOpen(self):
         logger.info("WebSocket connection opened")
+        # the page learns at once whether a maintenance is announced (and that
+        # none is any more, when it comes back after one)
+        user = self.factory.lobby.get_user(self)
+        if user is not None:
+            user.send(self.factory.lobby.maintenance_event())
 
     def onMessage(self, payload, is_binary):
         if is_binary:
@@ -83,6 +92,10 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
 
         action = message.get("action")
         result = None
+        # the sessions were stored when the maintenance started: nothing may change them now
+        if self.factory.lobby.maintenance.started:
+            self.send_error("maintenance", "The site is under maintenance")
+            return
         match action:
             case "list_game": # Gets the initialization values of the games
                 result = list_game(self, self.factory.lobby.logger, message)
