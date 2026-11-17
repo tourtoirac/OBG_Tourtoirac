@@ -387,9 +387,7 @@ class TestRotateRefusals:
     def test_a_deck_is_not_rotated(self):
         lobby = make_lobby(orientable=True)
         protocol = open_session(lobby)
-        only_session(lobby).components_dict["deck"] = Deck(
-            "deck", 0, 0, "/front.png", 50, 50, ["/front.png"],
-        )
+        only_session(lobby).components_dict["deck"] = Deck("deck", 0, 0, 50, 50)
         protocol.clear()
 
         receive(protocol, {

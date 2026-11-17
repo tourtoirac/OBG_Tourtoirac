@@ -71,7 +71,8 @@ class GameWebSocketProtocol(WebSocketServerProtocol):
                 "Invalid JSON message"
             )
             return
-        if 'action' in message.keys() and message['action'] not in ['move', 'view']:
+        # not an object: handle_message answers invalid_message
+        if isinstance(message, dict) and 'action' in message and message['action'] not in ['move', 'view']:
             logger.debug(f"Received message : {message}")
         try:
             self.handle_message(message)

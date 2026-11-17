@@ -340,9 +340,7 @@ class TestFlipRefusals:
 
     def test_a_deck_is_not_flipped(self, player):
         lobby = player.factory.lobby
-        only_session(lobby).components_dict["deck"] = Deck(
-            "deck", 0, 0, "/front.png", 50, 50, ["/front.png"],
-        )
+        only_session(lobby).components_dict["deck"] = Deck("deck", 0, 0, 50, 50)
         player.clear()
 
         receive(player, {"action": "flip", "component_id": "deck"})

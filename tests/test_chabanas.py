@@ -151,8 +151,9 @@ def failing_chabanas(serve):
 
 class TestSuccessfulCalls:
     def test_create_session_returns_the_session(self, chabanas, sync):
-        session = sync(chabanas.create_session("Waterloo", FakeUser(), "key"))
+        session, reason = sync(chabanas.create_session("Waterloo", FakeUser(), "key", True, None, None))
 
+        assert reason is None
         assert session["code"] == SESSION["code"]
         assert "game_json" in session
 
@@ -231,7 +232,8 @@ class TestFailureHandling:
     """Every failure must resolve to a falsy value, never raise."""
 
     def test_create_session_http_error(self, chabanas, sync):
-        assert sync(chabanas.create_session("Inconnu", FakeUser(), "k")) is False
+        assert sync(chabanas.create_session("Inconnu", FakeUser(), "k", True, None, None)) == (
+            None, "Unable to create session")
 
     def test_join_session_http_error(self, chabanas, sync):
         """A 404 is an unknown session, not a wrong access_key."""

@@ -130,7 +130,8 @@ class TestDispatch:
             "action": "create_session", "game_name": "Waterloo",
             "nickname": "alice", "key": "",
         })
-        assert client.last_event() == "session_created"
+        # the creator is answered like a joining player (handle_message.create_session)
+        assert client.last_event() == "session_joined"
         assert client.last["session"]["components"]["movable"][0]["id"] == "t1"
 
         other = Protocol(lobby)
@@ -140,7 +141,7 @@ class TestDispatch:
             "nickname": "bob", "key": "", "role": "player",
         })
         assert other.last_event() == "session_joined"
-        assert other.last["game"]["players"] == "2/2"
+        assert other.last["session"]["players"] == "2/2"
 
     def test_list_sessions(self, client):
         receive(client, {"action": "list_sessions"})
@@ -353,7 +354,7 @@ class TestComponentActions:
         assert bob.acquired == []
         assert alice.acquired == ["t1"], "alice reste detentrice"
 
-    def test_move_is_broadcast_to_the_others_only(self, lobby, in_session, session_info):
+    def test_move_is_broadcast_to_everybody(self, lobby, in_session, session_info):
         client, alice = in_session
         peer = Protocol(lobby)
         lobby.add_user(User(name="anonymous", protocol=peer))
@@ -370,7 +371,8 @@ class TestComponentActions:
         receive(client, {"action": "move", "component_id": "t1", "x": 42, "y": 24})
 
         assert peer.last_event() == "move", "les autres recoivent le deplacement"
-        assert client.sent == [], "l'emetteur ne recoit pas d'echo"
+        # the mover gets it too: its own screen drops the green frame (handle_message.move)
+        assert [m["event"] for m in client.sent] == ["move"]
         token = alice.session.get_component("t1")
         assert (token.x, token.y) == (42, 24)
 
@@ -433,7 +435,9 @@ class TestConnectionLifecycle:
         client.onClose(True, 1000, "normal")
 
         assert client not in lobby.users
-        assert lobby.sessions[user.session.key].players == []
+        assert user.session.players == []
+        # nobody left: its state is stored, then it leaves the memory (Lobby._save_state_if_empty)
+        assert user.session.key not in lobby.sessions
 
     def test_on_close_after_shutdown(self, lobby, client):
         """

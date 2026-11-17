@@ -239,12 +239,13 @@ class TestCloseSession:
         """
         A session that has never been emptied was never written: archiving it
         as is would keep the initial layout instead of where the tokens ended up.
+        The game then stops counting as in progress (vacate).
         """
         owner = reconnect_as_owner(lobby)
 
         close(owner)
 
-        assert chabanas.paths()[-2:] == ["/session/update", "/session/archive"]
+        assert chabanas.paths()[-3:] == ["/session/update", "/session/archive", "/session/vacate"]
 
     def test_the_session_stops_being_active(self, lobby):
         owner = reconnect_as_owner(lobby)
